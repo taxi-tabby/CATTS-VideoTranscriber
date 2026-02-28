@@ -1,0 +1,8 @@
+[project]
+name = "video-transcriber"
+version = "1.0.0"
+description = "영상 음성 추출 및 텍스트 변환 프로그램"
+requires-python = ">=3.11"
+
+[project.scripts]
+video-transcriber = "src.main:main"
