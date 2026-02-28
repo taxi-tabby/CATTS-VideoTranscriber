@@ -6,6 +6,7 @@ venv/
 dist/
 build/output/
 *.spec
+!build/video_transcriber.spec
 *.egg-info/
 *.wav
 *.db
