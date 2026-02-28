@@ -2,16 +2,18 @@
 import os
 import sys
 import imageio_ffmpeg
+import whisper
 
 block_cipher = None
 
 ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+whisper_dir = os.path.dirname(whisper.__file__)
 
 a = Analysis(
     ['../src/main.py'],
     pathex=[os.path.abspath('..')],
     binaries=[(ffmpeg_exe, 'imageio_ffmpeg/binaries')],
-    datas=[],
+    datas=[(os.path.join(whisper_dir, 'assets'), 'whisper/assets')],
     hiddenimports=[
         'whisper',
         'PySide6',
