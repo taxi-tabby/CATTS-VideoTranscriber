@@ -3,6 +3,7 @@ import os
 import sys
 import imageio_ffmpeg
 import whisper
+from PyInstaller.utils.hooks import collect_all
 
 block_cipher = None
 
@@ -14,16 +15,30 @@ import soundfile
 sf_dir = os.path.dirname(soundfile.__file__)
 libsndfile_dir = os.path.join(sf_dir, '_soundfile_data')
 
+# collect_all로 패키지 전체 수집 (바이너리, 데이터, hiddenimports)
+extra_datas = []
+extra_binaries = []
+extra_hiddenimports = []
+
+for pkg in ['torchaudio', 'pyannote', 'speechbrain', 'lightning', 'pytorch_lightning']:
+    try:
+        datas, binaries, hiddenimports = collect_all(pkg)
+        extra_datas.extend(datas)
+        extra_binaries.extend(binaries)
+        extra_hiddenimports.extend(hiddenimports)
+    except Exception:
+        pass  # 패키지 없으면 건너뜀
+
 a = Analysis(
     ['../src/main.py'],
     pathex=[os.path.abspath('..')],
     binaries=[
         (ffmpeg_exe, 'imageio_ffmpeg/binaries'),
         (os.path.join(libsndfile_dir, 'libsndfile_x64.dll'), '_soundfile_data'),
-    ],
+    ] + extra_binaries,
     datas=[
         (os.path.join(whisper_dir, 'assets'), 'whisper/assets'),
-    ],
+    ] + extra_datas,
     hiddenimports=[
         'whisper',
         'PySide6',
@@ -41,7 +56,7 @@ a = Analysis(
         'transformers',
         'torchaudio',
         'huggingface_hub',
-    ],
+    ] + extra_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

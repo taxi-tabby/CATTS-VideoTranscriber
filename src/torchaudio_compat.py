@@ -2,19 +2,25 @@
 
 torchaudio 2.10에서 제거된 API(info, AudioMetaData, list_audio_backends)를
 soundfile 기반으로 대체하여 pyannote.audio가 동작하도록 한다.
+torchaudio 자체가 없는 환경(exe 번들 등)에서는 안전하게 건너뛴다.
 """
-
-import importlib
 
 
 def patch_torchaudio():
-    """torchaudio에 누락된 API를 주입한다. 이미 있으면 건너뛴다."""
-    import torchaudio
+    """torchaudio에 누락된 API를 주입한다. 이미 있거나 torchaudio가 없으면 건너뛴다."""
+    try:
+        import torchaudio
+    except ImportError:
+        return  # torchaudio 없음 — 화자 분리 불가, 앱은 정상 실행
 
     if hasattr(torchaudio, "AudioMetaData") and hasattr(torchaudio, "info"):
         return  # 패치 불필요
 
-    import soundfile as sf
+    try:
+        import soundfile as sf
+    except ImportError:
+        return  # soundfile 없으면 패치 불가
+
     from dataclasses import dataclass
 
     @dataclass
