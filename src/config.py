@@ -1,0 +1,27 @@
+import json
+import os
+
+CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".video-transcriber", "config.json")
+
+
+def load_config() -> dict:
+    if not os.path.exists(CONFIG_PATH):
+        return {}
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_config(config: dict) -> None:
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+
+
+def get_hf_token() -> str | None:
+    return load_config().get("hf_token")
+
+
+def set_hf_token(token: str) -> None:
+    config = load_config()
+    config["hf_token"] = token
+    save_config(config)
