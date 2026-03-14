@@ -6,6 +6,9 @@
    pyannote.audio가 최신 huggingface_hub에서 동작하도록 한다.
 """
 
+import inspect
+import sys
+
 
 def patch_torchaudio():
     """torchaudio에 누락된 API를 주입한다. 이미 있거나 torchaudio가 없으면 건너뛴다."""
@@ -48,41 +51,56 @@ def patch_torchaudio():
     torchaudio.list_audio_backends = list_audio_backends
 
 
+def _wrap_use_auth_token(original_fn):
+    """use_auth_token → token 변환 래퍼를 생성한다."""
+    sig = inspect.signature(original_fn)
+    if "use_auth_token" in sig.parameters:
+        return None  # 이미 지원하므로 패치 불필요
+
+    def wrapper(*args, **kwargs):
+        token = kwargs.pop("use_auth_token", None)
+        if token is not None and "token" not in kwargs:
+            kwargs["token"] = token
+        return original_fn(*args, **kwargs)
+
+    return wrapper
+
+
 def patch_huggingface_hub():
-    """huggingface_hub의 use_auth_token → token 호환성 패치."""
+    """huggingface_hub의 use_auth_token → token 호환성 패치.
+
+    pyannote가 `from huggingface_hub import hf_hub_download`로 로컬 바인딩하므로,
+    huggingface_hub 모듈 자체 + 이미 import된 모든 모듈의 로컬 참조를 패치한다.
+    """
     try:
         import huggingface_hub
     except ImportError:
         return
 
-    import inspect
+    fn_names = ["hf_hub_download", "model_info", "list_repo_files"]
 
-    # hf_hub_download 패치
-    _original_download = huggingface_hub.hf_hub_download
-    sig = inspect.signature(_original_download)
-    if "use_auth_token" not in sig.parameters:
-        def _patched_download(*args, **kwargs):
-            token = kwargs.pop("use_auth_token", None)
-            if token is not None and "token" not in kwargs:
-                kwargs["token"] = token
-            return _original_download(*args, **kwargs)
-        huggingface_hub.hf_hub_download = _patched_download
-
-    # hf_hub_download이 호출하는 다른 함수들도 패치
-    for fn_name in ["model_info", "list_repo_files"]:
+    # 1단계: huggingface_hub 모듈의 함수 자체를 패치
+    patched = {}
+    for fn_name in fn_names:
         original = getattr(huggingface_hub, fn_name, None)
         if original is None:
             continue
-        sig = inspect.signature(original)
-        if "use_auth_token" not in sig.parameters:
-            def _make_patch(orig):
-                def _patched(*args, **kwargs):
-                    token = kwargs.pop("use_auth_token", None)
-                    if token is not None and "token" not in kwargs:
-                        kwargs["token"] = token
-                    return orig(*args, **kwargs)
-                return _patched
-            setattr(huggingface_hub, fn_name, _make_patch(original))
+        wrapper = _wrap_use_auth_token(original)
+        if wrapper is not None:
+            setattr(huggingface_hub, fn_name, wrapper)
+            patched[fn_name] = wrapper
+
+    # 2단계: 이미 import된 모듈에서 로컬 바인딩된 참조도 패치
+    # (예: pyannote.audio.core.pipeline에서 `from huggingface_hub import hf_hub_download`)
+    for module in list(sys.modules.values()):
+        if module is None or module is huggingface_hub:
+            continue
+        for fn_name, wrapper in patched.items():
+            if hasattr(module, fn_name):
+                attr = getattr(module, fn_name)
+                # huggingface_hub의 원본 함수를 참조하고 있는 경우만 패치
+                if callable(attr) and getattr(attr, "__module__", "").startswith("huggingface_hub"):
+                    setattr(module, fn_name, wrapper)
 
 
 def apply_all_patches():

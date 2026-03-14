@@ -6,10 +6,22 @@ def run_diarization(audio_path: str, hf_token: str) -> list[dict]:
     """pyannote.audio로 화자 분리 실행. 결과는 [{start, end, speaker}, ...] 리스트."""
     from pyannote.audio import Pipeline
 
+    # pyannote가 import된 후 로컬 바인딩도 패치
+    from src.torchaudio_compat import patch_huggingface_hub
+    patch_huggingface_hub()
+
     pipeline = Pipeline.from_pretrained(
         "pyannote/speaker-diarization-3.1",
         use_auth_token=hf_token,
     )
+
+    if pipeline is None:
+        raise RuntimeError(
+            "화자 분리 모델을 불러올 수 없습니다.\n"
+            "1. HuggingFace 토큰이 유효한지 확인하세요.\n"
+            "2. https://hf.co/pyannote/speaker-diarization-3.1 에서 라이선스에 동의했는지 확인하세요.\n"
+            "3. https://hf.co/pyannote/segmentation-3.0 에서도 라이선스에 동의해야 합니다."
+        )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     pipeline.to(device)
