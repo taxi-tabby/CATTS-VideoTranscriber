@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -8,6 +9,9 @@ import imageio_ffmpeg
 import numpy as np
 import whisper
 from PySide6.QtCore import QObject, Signal, QThread
+
+# Whisper 특수 토큰 패턴 (예: <|ro|>, <|en|>, <|0.00|> 등)
+_SPECIAL_TOKEN_RE = re.compile(r"<\|[^|]*\|>")
 
 
 def get_ffmpeg_exe() -> str:
@@ -124,9 +128,13 @@ class TranscriberWorker(QObject):
                 pct = min(pct, 95)
                 self.progress.emit(pct, f"변환 중... {processed_sec:.0f}s / {duration:.0f}s")
 
+                prompt = prev_text[-200:] if prev_text else None
+                if prompt:
+                    prompt = _SPECIAL_TOKEN_RE.sub("", prompt).strip() or None
+
                 result = model.transcribe(
                     chunk, language="ko", verbose=False,
-                    initial_prompt=prev_text[-200:] if prev_text else None,
+                    initial_prompt=prompt,
                 )
 
                 chunk_text = result.get("text", "").strip()
