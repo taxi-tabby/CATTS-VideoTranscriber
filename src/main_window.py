@@ -4,9 +4,14 @@ from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -20,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.config import get_hf_token, set_hf_token
 from src.database import Database
 from src.transcriber import TranscriberWorker
 
@@ -44,6 +50,7 @@ class MainWindow(QMainWindow):
         self.db = db
         self._worker = None
         self._thread = None
+        self._current_tid = None
 
         self.setWindowTitle("Video Transcriber")
         self.setMinimumSize(900, 600)
@@ -68,7 +75,7 @@ class MainWindow(QMainWindow):
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(8, 8, 4, 8)
 
-        self.btn_add = QPushButton("+ 영상 추가")
+        self.btn_add = QPushButton("+ 파일 추가")
         self.btn_add.setFixedHeight(36)
         self.btn_add.clicked.connect(self._on_add_video)
         left_layout.addWidget(self.btn_add)
@@ -113,8 +120,12 @@ class MainWindow(QMainWindow):
 
         right_layout.addWidget(self.tabs, stretch=1)
 
-        # Copy button
+        # Copy button + Speaker management button
         btn_row = QHBoxLayout()
+        self.btn_speakers = QPushButton("화자 관리")
+        self.btn_speakers.clicked.connect(self._on_manage_speakers)
+        self.btn_speakers.setVisible(False)
+        btn_row.addWidget(self.btn_speakers)
         btn_row.addStretch()
         self.btn_copy = QPushButton("텍스트 복사")
         self.btn_copy.clicked.connect(self._on_copy)
@@ -122,7 +133,7 @@ class MainWindow(QMainWindow):
         right_layout.addLayout(btn_row)
 
         # Empty state
-        self.lbl_empty = QLabel("영상을 추가하면 여기에 결과가 표시됩니다.")
+        self.lbl_empty = QLabel("영상 또는 음성 파일을 추가하면 여기에 결과가 표시됩니다.")
         self.lbl_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_empty.setStyleSheet("color: #888; font-size: 14px;")
         right_layout.addWidget(self.lbl_empty)
@@ -153,6 +164,7 @@ class MainWindow(QMainWindow):
         self.lbl_info.setVisible(show)
         self.tabs.setVisible(show)
         self.btn_copy.setVisible(show)
+        self.btn_speakers.setVisible(False)
         self.lbl_empty.setVisible(not show)
 
     # --- Data loading ---
@@ -178,22 +190,56 @@ class MainWindow(QMainWindow):
             self._show_detail(False)
             return
 
+        self._current_tid = tid
         self._show_detail(True)
         self.lbl_title.setText(data["filename"])
         dur = format_duration(data.get("duration"))
         date = data["created_at"][:10]
         self.lbl_info.setText(f"날짜: {date}    길이: {dur}")
 
-        # Timeline
+        # Timeline with speakers
         lines = []
         for seg in data.get("segments", []):
             ts_start = format_timestamp(seg["start"])
             ts_end = format_timestamp(seg["end"])
-            lines.append(f"[{ts_start} ~ {ts_end}]  {seg['text']}")
+            speaker = seg.get("speaker")
+            if speaker:
+                lines.append(f"[{ts_start} ~ {ts_end}]  [{speaker}]  {seg['text']}")
+            else:
+                lines.append(f"[{ts_start} ~ {ts_end}]  {seg['text']}")
         self.txt_timeline.setPlainText("\n".join(lines))
 
-        # Full text
-        self.txt_fulltext.setPlainText(data.get("full_text", ""))
+        # Full text with speaker grouping
+        self.txt_fulltext.setPlainText(self._build_full_text(data.get("segments", [])))
+
+        # 화자 관리 버튼: 화자 정보가 있을 때만 표시
+        has_speakers = any(s.get("speaker") for s in data.get("segments", []))
+        self.btn_speakers.setVisible(has_speakers)
+
+    def _build_full_text(self, segments: list[dict]) -> str:
+        if not segments:
+            return ""
+        has_speakers = any(s.get("speaker") for s in segments)
+        if not has_speakers:
+            return " ".join(s["text"] for s in segments)
+
+        lines = []
+        current_speaker = None
+        current_texts = []
+        for seg in segments:
+            speaker = seg.get("speaker")
+            if speaker != current_speaker:
+                if current_texts:
+                    prefix = f"{current_speaker}: " if current_speaker else ""
+                    lines.append(prefix + " ".join(current_texts))
+                current_speaker = speaker
+                current_texts = [seg["text"]]
+            else:
+                current_texts.append(seg["text"])
+        if current_texts:
+            prefix = f"{current_speaker}: " if current_speaker else ""
+            lines.append(prefix + " ".join(current_texts))
+        return "\n".join(lines)
 
     # --- Actions ---
 
@@ -204,28 +250,66 @@ class MainWindow(QMainWindow):
 
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "영상 파일 선택",
+            "미디어 파일 선택",
             "",
-            "영상 파일 (*.mp4 *.avi *.mkv *.mov *.wmv *.flv *.webm);;모든 파일 (*)",
+            "미디어 파일 (*.mp4 *.avi *.mkv *.mov *.wmv *.flv *.webm *.mp3 *.wav *.flac *.aac *.ogg *.wma *.m4a);;영상 파일 (*.mp4 *.avi *.mkv *.mov *.wmv *.flv *.webm);;음성 파일 (*.mp3 *.wav *.flac *.aac *.ogg *.wma *.m4a);;모든 파일 (*)",
         )
         if not path:
             return
 
-        self._start_transcription(path)
+        # 화자 분리 사용 여부 확인
+        use_diarization = False
+        hf_token = None
+        reply = QMessageBox.question(
+            self,
+            "화자 분리",
+            "화자 분리 기능을 사용하시겠습니까?\n(화자별로 발언을 구분합니다)",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            hf_token = get_hf_token()
+            if not hf_token:
+                token, ok = QInputDialog.getText(
+                    self,
+                    "HuggingFace 토큰",
+                    "화자 분리를 위해 HuggingFace 토큰이 필요합니다.\n"
+                    "https://huggingface.co/settings/tokens 에서 발급받으세요.\n\n"
+                    "토큰:",
+                    QLineEdit.EchoMode.Password,
+                )
+                if ok and token.strip():
+                    hf_token = token.strip()
+                    set_hf_token(hf_token)
+                else:
+                    hf_token = None
 
-    def _start_transcription(self, video_path: str):
+            if hf_token:
+                use_diarization = True
+
+        self._start_transcription(path, use_diarization, hf_token)
+
+    def _start_transcription(self, video_path: str, use_diarization: bool = False, hf_token: str | None = None):
         self.btn_add.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.lbl_status.setVisible(True)
         self.lbl_status.setText("준비 중...")
 
+        # Show right panel with live transcription
+        self._show_detail(True)
+        self.lbl_title.setText(os.path.basename(video_path))
+        self.lbl_info.setText("변환 진행 중...")
+        self.txt_timeline.clear()
+        self.txt_fulltext.clear()
+        self._live_segments = []
+
         self._thread = QThread()
-        self._worker = TranscriberWorker(video_path)
+        self._worker = TranscriberWorker(video_path, use_diarization, hf_token)
         self._worker.moveToThread(self._thread)
 
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._on_progress)
+        self._worker.segment_ready.connect(self._on_segment_ready)
         self._worker.finished.connect(self._on_finished)
         self._worker.error.connect(self._on_error)
         self._worker.finished.connect(self._thread.quit)
@@ -237,16 +321,56 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(percent)
         self.lbl_status.setText(message)
 
+    def _on_segment_ready(self, seg: dict):
+        self._live_segments.append(seg)
+        ts_start = format_timestamp(seg["start"])
+        ts_end = format_timestamp(seg["end"])
+        speaker = seg.get("speaker")
+        if speaker:
+            line = f"[{ts_start} ~ {ts_end}]  [{speaker}]  {seg['text']}"
+        else:
+            line = f"[{ts_start} ~ {ts_end}]  {seg['text']}"
+        self.txt_timeline.appendPlainText(line)
+        # Auto-scroll to bottom
+        scrollbar = self.txt_timeline.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+        # Update full text tab live
+        self.txt_fulltext.setPlainText(self._build_full_text(self._live_segments))
+
     def _on_finished(self, result: dict):
-        self.db.add_transcription(
+        tid = self.db.add_transcription(
             filename=result["filename"],
             filepath=result["filepath"],
             duration=result["duration"],
             full_text=result["full_text"],
             segments=result["segments"],
         )
+        self._current_tid = tid
+
+        # Update display with final mapped labels
+        dur = format_duration(result.get("duration"))
+        self.lbl_info.setText(f"길이: {dur}")
+
+        lines = []
+        for seg in result["segments"]:
+            ts_start = format_timestamp(seg["start"])
+            ts_end = format_timestamp(seg["end"])
+            speaker = seg.get("speaker")
+            if speaker:
+                lines.append(f"[{ts_start} ~ {ts_end}]  [{speaker}]  {seg['text']}")
+            else:
+                lines.append(f"[{ts_start} ~ {ts_end}]  {seg['text']}")
+        self.txt_timeline.setPlainText("\n".join(lines))
+        self.txt_fulltext.setPlainText(self._build_full_text(result["segments"]))
+
+        # 화자 정보 있으면 버튼 표시
+        has_speakers = any(s.get("speaker") for s in result.get("segments", []))
+        self.btn_speakers.setVisible(has_speakers)
+
         self._load_list()
+        self.list_widget.blockSignals(True)
         self.list_widget.setCurrentRow(0)
+        self.list_widget.blockSignals(False)
 
         self.btn_add.setEnabled(True)
         self.progress_bar.setVisible(False)
@@ -261,7 +385,42 @@ class MainWindow(QMainWindow):
         self.btn_add.setEnabled(True)
         self.progress_bar.setVisible(False)
         self.lbl_status.setVisible(False)
+        self._show_detail(False)
         QMessageBox.critical(self, "오류", f"변환 중 오류 발생:\n{message}")
+
+    def _on_manage_speakers(self):
+        if self._current_tid is None:
+            return
+
+        speakers = self.db.get_speakers(self._current_tid)
+        if not speakers:
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("화자 관리")
+        dialog.setMinimumWidth(350)
+        form = QFormLayout(dialog)
+
+        edits = {}
+        for speaker in speakers:
+            edit = QLineEdit(speaker)
+            edits[speaker] = edit
+            form.addRow(f"{speaker}:", edit)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            for old_name, edit in edits.items():
+                new_name = edit.text().strip()
+                if new_name and new_name != old_name:
+                    self.db.update_speaker_name(self._current_tid, old_name, new_name)
+            # Refresh display
+            self._on_select_item(self.list_widget.currentRow())
 
     def _on_delete(self):
         row = self.list_widget.currentRow()
