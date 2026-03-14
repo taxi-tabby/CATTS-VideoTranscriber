@@ -8,7 +8,7 @@ def run_diarization(audio_path: str, hf_token: str) -> list[dict]:
 
     pipeline = Pipeline.from_pretrained(
         "pyannote/speaker-diarization-3.1",
-        token=hf_token,
+        use_auth_token=hf_token,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
