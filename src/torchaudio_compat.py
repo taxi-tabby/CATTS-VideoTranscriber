@@ -17,6 +17,7 @@ def apply_all_patches():
     _patched = True
     _patch_torchaudio()
     _patch_huggingface_hub()
+    _patch_torch_load()
 
 
 def _patch_torchaudio():
@@ -94,3 +95,30 @@ def _patch_huggingface_hub():
             return wrapper
 
         setattr(huggingface_hub, fn_name, _make_wrapper(original))
+
+
+def _patch_torch_load():
+    """PyTorch 2.6+에서 weights_only=True 기본값 문제를 우회한다.
+
+    pyannote/speechbrain 체크포인트가 TorchVersion 등 커스텀 타입을 포함하므로
+    weights_only=False를 기본값으로 복원한다.
+    """
+    try:
+        import torch
+    except ImportError:
+        return
+
+    import functools
+
+    _original_load = torch.load
+    if getattr(_original_load, "_compat_patched", False):
+        return
+
+    @functools.wraps(_original_load)
+    def _patched_load(*args, **kwargs):
+        if "weights_only" not in kwargs:
+            kwargs["weights_only"] = False
+        return _original_load(*args, **kwargs)
+
+    _patched_load._compat_patched = True
+    torch.load = _patched_load
