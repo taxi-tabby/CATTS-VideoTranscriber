@@ -1,9 +1,6 @@
 import gc
 import torch
 
-from src.torchaudio_compat import patch_torchaudio
-patch_torchaudio()
-
 
 def run_diarization(audio_path: str, hf_token: str) -> list[dict]:
     """pyannote.audio로 화자 분리 실행. 결과는 [{start, end, speaker}, ...] 리스트."""

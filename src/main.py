@@ -1,6 +1,10 @@
 import os
 import sys
 
+# torchaudio 2.10+ 호환성 패치 — pyannote import 전에 실행 필수
+from src.torchaudio_compat import patch_torchaudio
+patch_torchaudio()
+
 from PySide6.QtWidgets import QApplication
 
 from src.database import Database
