@@ -25,3 +25,9 @@ def set_hf_token(token: str) -> None:
     config = load_config()
     config["hf_token"] = token
     save_config(config)
+
+
+def delete_hf_token() -> None:
+    config = load_config()
+    config.pop("hf_token", None)
+    save_config(config)

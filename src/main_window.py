@@ -1,15 +1,16 @@
 import os
+import webbrowser
 
 from PySide6.QtCore import Qt, QThread, QTimer
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -25,7 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.config import get_hf_token, set_hf_token
+from src.config import get_hf_token, set_hf_token, delete_hf_token
 from src.database import Database
 from src.transcriber import TranscriberWorker
 
@@ -43,6 +44,165 @@ def format_timestamp(seconds: float) -> str:
     m, s = divmod(rem, 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
 
+
+# ────────────────────────────────────────────
+# 화자 분리 설정 다이얼로그
+# ────────────────────────────────────────────
+
+class DiarizationSetupDialog(QDialog):
+    """화자 분리 사전 설정 다이얼로그.
+
+    - HuggingFace 토큰 입력/저장/검증
+    - 라이선스 동의 페이지 링크
+    - 토큰 유효성 검사
+    """
+
+    HF_MODELS = [
+        ("pyannote/speaker-diarization-3.1", "https://hf.co/pyannote/speaker-diarization-3.1"),
+        ("pyannote/segmentation-3.0", "https://hf.co/pyannote/segmentation-3.0"),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("화자 분리 설정")
+        self.setMinimumWidth(520)
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        # ── 1단계: 라이선스 동의 ──
+        grp_license = QGroupBox("1단계: 모델 라이선스 동의 (최초 1회)")
+        license_layout = QVBoxLayout(grp_license)
+
+        lbl_license = QLabel(
+            "아래 두 모델 페이지에서 각각 라이선스에 동의해야 합니다.\n"
+            "이미 동의했다면 이 단계를 건너뛰세요."
+        )
+        lbl_license.setWordWrap(True)
+        license_layout.addWidget(lbl_license)
+
+        for model_name, url in self.HF_MODELS:
+            btn_row = QHBoxLayout()
+            btn = QPushButton(f"  {model_name} 페이지 열기")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _, u=url: webbrowser.open(u))
+            btn_row.addWidget(btn)
+            btn_row.addStretch()
+            license_layout.addLayout(btn_row)
+
+        layout.addWidget(grp_license)
+
+        # ── 2단계: 토큰 입력 ──
+        grp_token = QGroupBox("2단계: HuggingFace 토큰 입력")
+        token_layout = QVBoxLayout(grp_token)
+
+        btn_token_page = QPushButton("  토큰 발급 페이지 열기 (huggingface.co/settings/tokens)")
+        btn_token_page.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_token_page.clicked.connect(lambda: webbrowser.open("https://huggingface.co/settings/tokens"))
+        token_layout.addWidget(btn_token_page)
+
+        token_input_row = QHBoxLayout()
+        lbl_token = QLabel("토큰:")
+        self.edit_token = QLineEdit()
+        self.edit_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.edit_token.setPlaceholderText("hf_...")
+
+        # 기존 토큰이 있으면 표시
+        existing = get_hf_token()
+        if existing:
+            self.edit_token.setText(existing)
+
+        token_input_row.addWidget(lbl_token)
+        token_input_row.addWidget(self.edit_token, stretch=1)
+        token_layout.addLayout(token_input_row)
+
+        # 토큰 검증 버튼
+        verify_row = QHBoxLayout()
+        self.btn_verify = QPushButton("토큰 검증")
+        self.btn_verify.clicked.connect(self._on_verify)
+        self.lbl_verify_result = QLabel("")
+        verify_row.addWidget(self.btn_verify)
+        verify_row.addWidget(self.lbl_verify_result, stretch=1)
+        token_layout.addLayout(verify_row)
+
+        layout.addWidget(grp_token)
+
+        # ── 3단계: 시작 ──
+        btn_layout = QHBoxLayout()
+
+        self.btn_delete_token = QPushButton("저장된 토큰 삭제")
+        self.btn_delete_token.clicked.connect(self._on_delete_token)
+        btn_layout.addWidget(self.btn_delete_token)
+
+        btn_layout.addStretch()
+
+        btn_cancel = QPushButton("취소")
+        btn_cancel.clicked.connect(self.reject)
+        btn_layout.addWidget(btn_cancel)
+
+        self.btn_start = QPushButton("화자 분리 시작")
+        self.btn_start.setDefault(True)
+        self.btn_start.clicked.connect(self._on_start)
+        btn_layout.addWidget(self.btn_start)
+
+        layout.addLayout(btn_layout)
+
+    def _on_verify(self):
+        token = self.edit_token.text().strip()
+        if not token:
+            self.lbl_verify_result.setText("토큰을 입력하세요.")
+            self.lbl_verify_result.setStyleSheet("color: red;")
+            return
+
+        self.btn_verify.setEnabled(False)
+        self.lbl_verify_result.setText("검증 중...")
+        self.lbl_verify_result.setStyleSheet("color: gray;")
+        QApplication.processEvents()
+
+        try:
+            import huggingface_hub
+            api = huggingface_hub.HfApi(token=token)
+            # 모델 접근 권한 확인
+            api.model_info("pyannote/speaker-diarization-3.1")
+            api.model_info("pyannote/segmentation-3.0")
+            self.lbl_verify_result.setText("토큰 유효! 두 모델 모두 접근 가능합니다.")
+            self.lbl_verify_result.setStyleSheet("color: green;")
+        except Exception as e:
+            err = str(e)
+            if "401" in err or "Unauthorized" in err:
+                self.lbl_verify_result.setText("토큰이 유효하지 않습니다. 다시 확인하세요.")
+            elif "403" in err or "Access" in err or "gated" in err.lower():
+                self.lbl_verify_result.setText("모델 라이선스 동의가 필요합니다. 1단계를 완료하세요.")
+            elif "404" in err:
+                self.lbl_verify_result.setText("모델을 찾을 수 없습니다. 라이선스 동의를 확인하세요.")
+            else:
+                self.lbl_verify_result.setText(f"오류: {err[:100]}")
+            self.lbl_verify_result.setStyleSheet("color: red;")
+        finally:
+            self.btn_verify.setEnabled(True)
+
+    def _on_delete_token(self):
+        delete_hf_token()
+        self.edit_token.clear()
+        self.lbl_verify_result.setText("저장된 토큰이 삭제되었습니다.")
+        self.lbl_verify_result.setStyleSheet("color: gray;")
+
+    def _on_start(self):
+        token = self.edit_token.text().strip()
+        if not token:
+            QMessageBox.warning(self, "토큰 필요", "HuggingFace 토큰을 입력하세요.")
+            return
+        set_hf_token(token)
+        self.accept()
+
+    def get_token(self) -> str | None:
+        return self.edit_token.text().strip() or None
+
+
+# ────────────────────────────────────────────
+# 메인 윈도우
+# ────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
     def __init__(self, db: Database):
@@ -84,9 +244,17 @@ class MainWindow(QMainWindow):
         self.list_widget.currentRowChanged.connect(self._on_select_item)
         left_layout.addWidget(self.list_widget)
 
+        # Bottom buttons
+        left_btn_row = QHBoxLayout()
         self.btn_delete = QPushButton("선택 삭제")
         self.btn_delete.clicked.connect(self._on_delete)
-        left_layout.addWidget(self.btn_delete)
+        left_btn_row.addWidget(self.btn_delete)
+
+        self.btn_settings = QPushButton("화자 분리 설정")
+        self.btn_settings.clicked.connect(self._on_diarization_settings)
+        left_btn_row.addWidget(self.btn_settings)
+
+        left_layout.addLayout(left_btn_row)
 
         splitter.addWidget(left)
 
@@ -243,6 +411,11 @@ class MainWindow(QMainWindow):
 
     # --- Actions ---
 
+    def _on_diarization_settings(self):
+        """화자 분리 설정 다이얼로그를 독립적으로 열기."""
+        dialog = DiarizationSetupDialog(self)
+        dialog.exec()
+
     def _on_add_video(self):
         if self._thread and self._thread.isRunning():
             QMessageBox.warning(self, "진행 중", "현재 변환이 진행 중입니다. 완료 후 다시 시도하세요.")
@@ -268,20 +441,23 @@ class MainWindow(QMainWindow):
         )
         if reply == QMessageBox.StandardButton.Yes:
             hf_token = get_hf_token()
+
             if not hf_token:
-                token, ok = QInputDialog.getText(
-                    self,
-                    "HuggingFace 토큰",
-                    "화자 분리를 위해 HuggingFace 토큰이 필요합니다.\n"
-                    "https://huggingface.co/settings/tokens 에서 발급받으세요.\n\n"
-                    "토큰:",
-                    QLineEdit.EchoMode.Password,
-                )
-                if ok and token.strip():
-                    hf_token = token.strip()
-                    set_hf_token(hf_token)
+                # 토큰 없음 → 설정 다이얼로그 열기
+                dialog = DiarizationSetupDialog(self)
+                if dialog.exec() != QDialog.DialogCode.Accepted:
+                    # 취소 → 화자 분리 없이 진행할지 확인
+                    reply2 = QMessageBox.question(
+                        self,
+                        "화자 분리 없이 진행",
+                        "화자 분리 없이 텍스트 변환만 진행하시겠습니까?",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    )
+                    if reply2 == QMessageBox.StandardButton.No:
+                        return
+                    # Yes → 화자 분리 없이 진행
                 else:
-                    hf_token = None
+                    hf_token = dialog.get_token()
 
             if hf_token:
                 use_diarization = True
