@@ -1,18 +1,21 @@
 import gc
+import os
+
 import torch
 
 
 def run_diarization(audio_path: str, hf_token: str) -> list[dict]:
     """pyannote.audio로 화자 분리 실행. 결과는 [{start, end, speaker}, ...] 리스트."""
-    from pyannote.audio import Pipeline
 
-    # pyannote가 import된 후 로컬 바인딩도 패치
-    from src.torchaudio_compat import patch_huggingface_hub
-    patch_huggingface_hub()
+    # HF_TOKEN 환경변수로 토큰 전달 — huggingface_hub가 자동으로 읽음.
+    # use_auth_token 파라미터를 사용하지 않으므로 pyannote/huggingface_hub
+    # 버전 간 호환성 문제를 완전히 우회.
+    os.environ["HF_TOKEN"] = hf_token
+
+    from pyannote.audio import Pipeline
 
     pipeline = Pipeline.from_pretrained(
         "pyannote/speaker-diarization-3.1",
-        use_auth_token=hf_token,
     )
 
     if pipeline is None:
