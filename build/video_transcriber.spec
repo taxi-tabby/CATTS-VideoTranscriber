@@ -20,7 +20,7 @@ extra_datas = []
 extra_binaries = []
 extra_hiddenimports = []
 
-for pkg in ['torchaudio', 'pyannote', 'speechbrain', 'lightning', 'pytorch_lightning']:
+for pkg in ['torchaudio', 'pyannote', 'speechbrain', 'lightning', 'lightning_fabric', 'pytorch_lightning']:
     try:
         datas, binaries, hiddenimports = collect_all(pkg)
         extra_datas.extend(datas)
@@ -28,6 +28,14 @@ for pkg in ['torchaudio', 'pyannote', 'speechbrain', 'lightning', 'pytorch_light
         extra_hiddenimports.extend(hiddenimports)
     except Exception:
         pass  # 패키지 없으면 건너뜀
+
+# lightning 패키지들의 version.info 명시적 포함
+import site
+sp = site.getsitepackages()[0] if site.getsitepackages() else os.path.join(sys.prefix, 'Lib', 'site-packages')
+for pkg_name in ['lightning', 'lightning_fabric', 'pytorch_lightning']:
+    vi = os.path.join(sp, pkg_name, 'version.info')
+    if os.path.exists(vi):
+        extra_datas.append((vi, pkg_name))
 
 a = Analysis(
     ['../src/main.py'],
