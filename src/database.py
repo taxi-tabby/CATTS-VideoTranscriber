@@ -29,6 +29,16 @@ class Database:
             );
         """)
         self._conn.commit()
+        self._migrate_add_speaker_column()
+
+    def _migrate_add_speaker_column(self):
+        columns = [
+            row[1] for row in
+            self._conn.execute("PRAGMA table_info(segments)").fetchall()
+        ]
+        if "speaker" not in columns:
+            self._conn.execute("ALTER TABLE segments ADD COLUMN speaker TEXT")
+            self._conn.commit()
 
     def add_transcription(
         self,
@@ -46,9 +56,9 @@ class Database:
         tid = cur.lastrowid
         for seg in segments:
             self._conn.execute(
-                """INSERT INTO segments (transcription_id, start_time, end_time, text)
-                   VALUES (?, ?, ?, ?)""",
-                (tid, seg["start"], seg["end"], seg["text"]),
+                """INSERT INTO segments (transcription_id, start_time, end_time, text, speaker)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (tid, seg["start"], seg["end"], seg["text"], seg.get("speaker")),
             )
         self._conn.commit()
         return tid
@@ -67,11 +77,25 @@ class Database:
             return None
         result = dict(row)
         seg_rows = self._conn.execute(
-            "SELECT start_time as start, end_time as end, text FROM segments WHERE transcription_id = ? ORDER BY start_time",
+            "SELECT start_time as start, end_time as end, text, speaker FROM segments WHERE transcription_id = ? ORDER BY start_time",
             (tid,),
         ).fetchall()
         result["segments"] = [dict(s) for s in seg_rows]
         return result
+
+    def get_speakers(self, tid: int) -> list[str]:
+        rows = self._conn.execute(
+            "SELECT DISTINCT speaker FROM segments WHERE transcription_id = ? AND speaker IS NOT NULL ORDER BY speaker",
+            (tid,),
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def update_speaker_name(self, tid: int, old_name: str, new_name: str) -> None:
+        self._conn.execute(
+            "UPDATE segments SET speaker = ? WHERE transcription_id = ? AND speaker = ?",
+            (new_name, tid, old_name),
+        )
+        self._conn.commit()
 
     def delete_transcription(self, tid: int):
         self._conn.execute("DELETE FROM transcriptions WHERE id = ?", (tid,))
