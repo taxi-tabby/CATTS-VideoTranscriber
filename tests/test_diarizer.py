@@ -59,6 +59,33 @@ class TestAssignSpeakers:
         result = assign_speakers([], whisper_segments)
         assert result[0]["speaker"] is None
 
+    def test_weighted_voting_aggregates_overlap(self):
+        """같은 화자의 여러 구간 겹침을 합산하여 배정"""
+        diarization_segments = [
+            {"start": 0.0, "end": 3.0, "speaker": "SPEAKER_00"},
+            {"start": 3.0, "end": 8.0, "speaker": "SPEAKER_01"},
+            {"start": 8.0, "end": 10.0, "speaker": "SPEAKER_00"},
+        ]
+        whisper_segments = [
+            {"start": 0.0, "end": 10.0, "text": "전체 구간"},
+        ]
+        result = assign_speakers(diarization_segments, whisper_segments)
+        # SPEAKER_00: 3+2=5초, SPEAKER_01: 5초 → 동률 → SPEAKER_00 (먼저 등장)
+        assert result[0]["speaker"] == "SPEAKER_00"
+
+    def test_weighted_voting_tiebreak_by_earliest(self):
+        """동률 시 해당 구간에서 먼저 등장한 화자 선택"""
+        diarization_segments = [
+            {"start": 0.0, "end": 5.0, "speaker": "SPEAKER_01"},
+            {"start": 5.0, "end": 10.0, "speaker": "SPEAKER_00"},
+        ]
+        whisper_segments = [
+            {"start": 0.0, "end": 10.0, "text": "동률 구간"},
+        ]
+        result = assign_speakers(diarization_segments, whisper_segments)
+        # 둘 다 5초 → SPEAKER_01이 0초에 먼저 등장
+        assert result[0]["speaker"] == "SPEAKER_01"
+
     def test_preserves_segment_fields(self):
         diarization_segments = [
             {"start": 0.0, "end": 10.0, "speaker": "SPEAKER_00"},

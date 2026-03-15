@@ -1,10 +1,17 @@
 import gc
 import os
+from collections import defaultdict
 
 import torch
 
 
-def run_diarization(audio_path: str, hf_token: str) -> list[dict]:
+def run_diarization(
+    audio_path: str,
+    hf_token: str,
+    num_speakers: int | None = None,
+    min_speakers: int | None = None,
+    max_speakers: int | None = None,
+) -> list[dict]:
     """pyannote.audio로 화자 분리 실행. 결과는 [{start, end, speaker}, ...] 리스트."""
 
     # HF_TOKEN 환경변수로 토큰 전달 — huggingface_hub가 자동으로 읽음.
@@ -29,7 +36,16 @@ def run_diarization(audio_path: str, hf_token: str) -> list[dict]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     pipeline.to(device)
 
-    diarization = pipeline(audio_path)
+    kwargs = {}
+    if num_speakers is not None:
+        kwargs["num_speakers"] = num_speakers
+    else:
+        if min_speakers is not None:
+            kwargs["min_speakers"] = min_speakers
+        if max_speakers is not None:
+            kwargs["max_speakers"] = max_speakers
+
+    diarization = pipeline(audio_path, **kwargs)
 
     segments = []
     for turn, _, speaker in diarization.itertracks(yield_label=True):
@@ -52,20 +68,33 @@ def assign_speakers(
     diarization_segments: list[dict],
     whisper_segments: list[dict],
 ) -> list[dict]:
-    """최대 겹침 방식으로 각 Whisper 세그먼트에 화자를 할당."""
+    """가중 투표 방식으로 각 Whisper 세그먼트에 화자를 할당.
+
+    같은 화자의 여러 diarization 세그먼트 겹침을 합산하고,
+    동률 시 해당 구간에서 가장 이른 start를 가진 화자를 선택.
+    """
     result = []
     for wseg in whisper_segments:
-        best_speaker = None
-        best_overlap = 0.0
+        speaker_overlap: dict[str, float] = defaultdict(float)
+        speaker_earliest: dict[str, float] = {}
 
         for dseg in diarization_segments:
             overlap_start = max(wseg["start"], dseg["start"])
             overlap_end = min(wseg["end"], dseg["end"])
             overlap = max(0.0, overlap_end - overlap_start)
 
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best_speaker = dseg["speaker"]
+            if overlap > 0:
+                speaker = dseg["speaker"]
+                speaker_overlap[speaker] += overlap
+                if speaker not in speaker_earliest:
+                    speaker_earliest[speaker] = dseg["start"]
+
+        best_speaker = None
+        if speaker_overlap:
+            best_speaker = min(
+                speaker_overlap,
+                key=lambda s: (-speaker_overlap[s], speaker_earliest.get(s, float("inf"))),
+            )
 
         result.append({
             "start": wseg["start"],
