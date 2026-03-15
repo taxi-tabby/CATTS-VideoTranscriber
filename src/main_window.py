@@ -62,13 +62,13 @@ class SettingsDialog(QDialog):
 
     WHISPER_MODELS = ["tiny", "base", "small", "medium", "large-v3"]
 
-    def __init__(self, db_path: str, parent=None):
+    def __init__(self, db_path: str, parent=None, initial_tab: int = 0):
         super().__init__(parent)
         self.setWindowTitle("설정")
         self.setMinimumWidth(520)
-        self._build_ui(db_path)
+        self._build_ui(db_path, initial_tab)
 
-    def _build_ui(self, db_path: str):
+    def _build_ui(self, db_path: str, initial_tab: int):
         layout = QVBoxLayout(self)
         tabs = QTabWidget()
 
@@ -150,6 +150,7 @@ class SettingsDialog(QDialog):
         diar_layout.addStretch()
         tabs.addTab(diar_tab, "화자 분리")
 
+        tabs.setCurrentIndex(initial_tab)
         layout.addWidget(tabs)
 
         btn_layout = QHBoxLayout()
@@ -608,7 +609,7 @@ class MainWindow(QMainWindow):
                     self, "토큰 필요",
                     "화자 분리에는 HuggingFace 토큰이 필요합니다.\n설정에서 토큰을 먼저 등록하세요.",
                 )
-                dialog = SettingsDialog(self.db.db_path, self)
+                dialog = SettingsDialog(self.db.db_path, self, initial_tab=1)
                 dialog.exec()
                 hf_token = get_hf_token()
                 if not hf_token:
