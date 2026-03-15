@@ -29,7 +29,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.config import get_hf_token, set_hf_token, delete_hf_token, get_whisper_model, set_whisper_model
+from src.config import (
+    get_hf_token, set_hf_token, delete_hf_token,
+    get_whisper_model, set_whisper_model,
+    get_show_startup_guide, set_show_startup_guide,
+)
 from src.database import Database
 from src.transcriber import TranscriberWorker
 
@@ -46,6 +50,83 @@ def format_timestamp(seconds: float) -> str:
     h, rem = divmod(int(seconds), 3600)
     m, s = divmod(rem, 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+# ────────────────────────────────────────────
+# 시작 안내 다이얼로그
+# ────────────────────────────────────────────
+
+class StartupGuideDialog(QDialog):
+    """첫 실행 시 필요 환경을 안내하는 다이얼로그."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("시작 안내")
+        self.setMinimumWidth(500)
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        title = QLabel("Video Transcriber 사용 안내")
+        title.setFont(QFont("", 13, QFont.Weight.Bold))
+        layout.addWidget(title)
+
+        layout.addSpacing(8)
+
+        info = QLabel(
+            "이 프로그램은 영상/음성 파일에서 텍스트를 추출합니다.\n"
+            "아래 환경이 필요합니다.\n"
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        # 필수 환경
+        grp_required = QGroupBox("필수")
+        req_layout = QVBoxLayout(grp_required)
+        req_layout.addWidget(QLabel(
+            "- 인터넷 연결: 첫 실행 시 Whisper 음성인식 모델을 다운로드합니다\n"
+            "  (모델 크기: tiny 39MB ~ large 1.5GB, 기본값 medium 769MB)\n"
+            "- 다운로드된 모델은 저장되므로 이후에는 오프라인으로 사용 가능합니다"
+        ))
+        layout.addWidget(grp_required)
+
+        # 권장 환경
+        grp_recommended = QGroupBox("권장")
+        rec_layout = QVBoxLayout(grp_recommended)
+        rec_layout.addWidget(QLabel(
+            "- NVIDIA GPU (CUDA): 변환 속도가 크게 향상됩니다\n"
+            "  (GPU 없이도 CPU로 동작하지만 느릴 수 있습니다)"
+        ))
+        layout.addWidget(grp_recommended)
+
+        # 화자 분리 기능
+        grp_diar = QGroupBox("화자 분리 기능 사용 시 (선택)")
+        diar_layout = QVBoxLayout(grp_diar)
+        diar_layout.addWidget(QLabel(
+            "- HuggingFace 계정 및 토큰 (무료)\n"
+            "- pyannote 모델 라이선스 동의 (무료)\n"
+            "- 설정 버튼에서 토큰을 등록할 수 있습니다"
+        ))
+        layout.addWidget(grp_diar)
+
+        layout.addSpacing(8)
+
+        # 다시 보지 않기 체크박스 + 확인 버튼
+        bottom = QHBoxLayout()
+        self.chk_dont_show = QCheckBox("다시 표시하지 않기")
+        bottom.addWidget(self.chk_dont_show)
+        bottom.addStretch()
+        btn_ok = QPushButton("확인")
+        btn_ok.setDefault(True)
+        btn_ok.clicked.connect(self._on_ok)
+        bottom.addWidget(btn_ok)
+        layout.addLayout(bottom)
+
+    def _on_ok(self):
+        if self.chk_dont_show.isChecked():
+            set_show_startup_guide(False)
+        self.accept()
 
 
 # ────────────────────────────────────────────
@@ -384,6 +465,12 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._load_list()
+
+        if get_show_startup_guide():
+            QTimer.singleShot(0, self._show_startup_guide)
+
+    def _show_startup_guide(self):
+        StartupGuideDialog(self).exec()
 
     def _build_ui(self):
         central = QWidget()

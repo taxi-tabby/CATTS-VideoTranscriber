@@ -41,3 +41,13 @@ def set_whisper_model(model: str) -> None:
     config = load_config()
     config["whisper_model"] = model
     save_config(config)
+
+
+def get_show_startup_guide() -> bool:
+    return load_config().get("show_startup_guide", True)
+
+
+def set_show_startup_guide(show: bool) -> None:
+    config = load_config()
+    config["show_startup_guide"] = show
+    save_config(config)
