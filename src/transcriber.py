@@ -56,11 +56,24 @@ class TranscriberWorker(QObject):
     finished = Signal(dict)           # transcription result
     error = Signal(str)               # error message
 
-    def __init__(self, video_path: str, use_diarization: bool = False, hf_token: str | None = None):
+    def __init__(
+        self,
+        video_path: str,
+        use_diarization: bool = False,
+        hf_token: str | None = None,
+        model_name: str = "medium",
+        num_speakers: int | None = None,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
+    ):
         super().__init__()
         self.video_path = video_path
         self.use_diarization = use_diarization
         self.hf_token = hf_token
+        self.model_name = model_name
+        self.num_speakers = num_speakers
+        self.min_speakers = min_speakers
+        self.max_speakers = max_speakers
         self._cancelled = False
 
     def cancel(self):
@@ -94,7 +107,12 @@ class TranscriberWorker(QObject):
             if use_diar:
                 self.progress.emit(8, "화자 분석 중... (취소 불가)")
                 from src.diarizer import run_diarization
-                diarization_segments = run_diarization(tmp_wav, self.hf_token)
+                diarization_segments = run_diarization(
+                    tmp_wav, self.hf_token,
+                    num_speakers=self.num_speakers,
+                    min_speakers=self.min_speakers,
+                    max_speakers=self.max_speakers,
+                )
                 self.progress.emit(18, "화자 분석 완료")
                 if self._cancelled:
                     return
@@ -102,7 +120,7 @@ class TranscriberWorker(QObject):
             # Step 3: Load Whisper model
             model_pct = 18 if use_diar else 15
             self.progress.emit(model_pct, "Whisper 모델 로드 중... (첫 실행 시 다운로드)")
-            model = whisper.load_model("medium")
+            model = whisper.load_model(self.model_name)
             if self._cancelled:
                 return
 
