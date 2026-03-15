@@ -51,3 +51,13 @@ def set_show_startup_guide(show: bool) -> None:
     config = load_config()
     config["show_startup_guide"] = show
     save_config(config)
+
+
+def get_theme() -> str:
+    return load_config().get("theme", "light")
+
+
+def set_theme(theme: str) -> None:
+    config = load_config()
+    config["theme"] = theme
+    save_config(config)

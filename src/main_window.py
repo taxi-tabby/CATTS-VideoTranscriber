@@ -33,6 +33,7 @@ from src.config import (
     get_hf_token, set_hf_token, delete_hf_token,
     get_whisper_model, set_whisper_model,
     get_show_startup_guide, set_show_startup_guide,
+    get_theme, set_theme,
 )
 from src.database import Database
 from src.transcriber import TranscriberWorker
@@ -170,6 +171,21 @@ class SettingsDialog(QDialog):
         whisper_layout.addStretch()
         general_layout.addWidget(grp_whisper)
 
+        # 테마
+        grp_theme = QGroupBox("테마")
+        theme_layout = QHBoxLayout(grp_theme)
+        theme_layout.addWidget(QLabel("테마:"))
+        self.combo_theme = QComboBox()
+        self.combo_theme.addItem("라이트", "light")
+        self.combo_theme.addItem("다크", "dark")
+        current_theme = get_theme()
+        idx = self.combo_theme.findData(current_theme)
+        if idx >= 0:
+            self.combo_theme.setCurrentIndex(idx)
+        theme_layout.addWidget(self.combo_theme)
+        theme_layout.addStretch()
+        general_layout.addWidget(grp_theme)
+
         grp_data = QGroupBox("데이터 저장 위치")
         data_layout = QVBoxLayout(grp_data)
         db_folder = os.path.dirname(db_path)
@@ -299,9 +315,14 @@ class SettingsDialog(QDialog):
 
     def _on_save(self):
         set_whisper_model(self.combo_model.currentText())
+        new_theme = self.combo_theme.currentData()
+        old_theme = get_theme()
+        set_theme(new_theme)
         token = self.edit_token.text().strip()
         if token:
             set_hf_token(token)
+        if new_theme != old_theme:
+            QMessageBox.information(self, "테마 변경", "테마 변경은 프로그램을 다시 시작하면 적용됩니다.")
         self.accept()
 
 
