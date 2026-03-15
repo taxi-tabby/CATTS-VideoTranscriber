@@ -475,6 +475,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Video Transcriber")
         self.setMinimumSize(900, 600)
         self.resize(1100, 700)
+        self.setAcceptDrops(True)
 
         self._build_ui()
         self._load_list()
@@ -682,10 +683,6 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _on_add_video(self):
-        if self._thread and self._thread.isRunning():
-            QMessageBox.warning(self, "진행 중", "현재 변환이 진행 중입니다. 완료 후 다시 시도하세요.")
-            return
-
         path, _ = QFileDialog.getOpenFileName(
             self,
             "미디어 파일 선택",
@@ -694,35 +691,7 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
-
-        settings_dialog = TranscriptionSettingsDialog(self)
-        if settings_dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-
-        settings = settings_dialog.get_settings()
-        hf_token = None
-
-        if settings["use_diarization"]:
-            hf_token = get_hf_token()
-            if not hf_token:
-                QMessageBox.information(
-                    self, "토큰 필요",
-                    "화자 분리에는 HuggingFace 토큰이 필요합니다.\n설정에서 토큰을 먼저 등록하세요.",
-                )
-                dialog = SettingsDialog(self.db.db_path, self, initial_tab=1)
-                dialog.exec()
-                hf_token = get_hf_token()
-                if not hf_token:
-                    reply = QMessageBox.question(
-                        self, "화자 분리 없이 진행",
-                        "토큰이 없어 화자 분리를 사용할 수 없습니다.\n텍스트 변환만 진행하시겠습니까?",
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    )
-                    if reply == QMessageBox.StandardButton.No:
-                        return
-                    settings["use_diarization"] = False
-
-        self._start_transcription(path, settings, hf_token)
+        self._add_file(path)
 
     def _start_transcription(self, video_path: str, settings: dict, hf_token: str | None = None):
         self.btn_add.setEnabled(False)
@@ -909,6 +878,64 @@ class MainWindow(QMainWindow):
             self.lbl_status.setVisible(True)
             self.lbl_status.setText("클립보드에 복사됨!")
             QTimer.singleShot(2000, lambda: self.lbl_status.setVisible(False))
+
+    _MEDIA_EXTENSIONS = {
+        ".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm",
+        ".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".m4a",
+    }
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.isLocalFile():
+                    ext = os.path.splitext(url.toLocalFile())[1].lower()
+                    if ext in self._MEDIA_EXTENSIONS:
+                        event.acceptProposedAction()
+                        return
+
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            if url.isLocalFile():
+                path = url.toLocalFile()
+                ext = os.path.splitext(path)[1].lower()
+                if ext in self._MEDIA_EXTENSIONS:
+                    self._add_file(path)
+                    return
+
+    def _add_file(self, path: str):
+        """파일 경로로 트랜스크립션 시작 (버튼/드래그 앤 드롭 공용)."""
+        if self._thread and self._thread.isRunning():
+            QMessageBox.warning(self, "진행 중", "현재 변환이 진행 중입니다. 완료 후 다시 시도하세요.")
+            return
+
+        settings_dialog = TranscriptionSettingsDialog(self)
+        if settings_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        settings = settings_dialog.get_settings()
+        hf_token = None
+
+        if settings["use_diarization"]:
+            hf_token = get_hf_token()
+            if not hf_token:
+                QMessageBox.information(
+                    self, "토큰 필요",
+                    "화자 분리에는 HuggingFace 토큰이 필요합니다.\n설정에서 토큰을 먼저 등록하세요.",
+                )
+                dialog = SettingsDialog(self.db.db_path, self, initial_tab=1)
+                dialog.exec()
+                hf_token = get_hf_token()
+                if not hf_token:
+                    reply = QMessageBox.question(
+                        self, "화자 분리 없이 진행",
+                        "토큰이 없어 화자 분리를 사용할 수 없습니다.\n텍스트 변환만 진행하시겠습니까?",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    )
+                    if reply == QMessageBox.StandardButton.No:
+                        return
+                    settings["use_diarization"] = False
+
+        self._start_transcription(path, settings, hf_token)
 
     def closeEvent(self, event):
         if self._thread and self._thread.isRunning():
