@@ -4,6 +4,7 @@ from datetime import datetime
 
 class Database:
     def __init__(self, db_path: str):
+        self.db_path = db_path
         self._conn = sqlite3.connect(db_path)
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.row_factory = sqlite3.Row

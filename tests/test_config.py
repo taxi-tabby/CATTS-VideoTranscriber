@@ -1,5 +1,5 @@
 import pytest
-from src.config import load_config, save_config, get_hf_token, set_hf_token
+from src.config import load_config, save_config, get_hf_token, set_hf_token, get_whisper_model, set_whisper_model
 
 
 @pytest.fixture
@@ -30,3 +30,10 @@ class TestConfig:
         save_config({"key": "value"})
         import os
         assert os.path.exists(config_dir)
+
+    def test_get_whisper_model_default(self, config_dir):
+        assert get_whisper_model() == "medium"
+
+    def test_set_and_get_whisper_model(self, config_dir):
+        set_whisper_model("large-v3")
+        assert get_whisper_model() == "large-v3"

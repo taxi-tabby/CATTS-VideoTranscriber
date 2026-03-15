@@ -31,3 +31,13 @@ def delete_hf_token() -> None:
     config = load_config()
     config.pop("hf_token", None)
     save_config(config)
+
+
+def get_whisper_model() -> str:
+    return load_config().get("whisper_model", "medium")
+
+
+def set_whisper_model(model: str) -> None:
+    config = load_config()
+    config["whisper_model"] = model
+    save_config(config)
