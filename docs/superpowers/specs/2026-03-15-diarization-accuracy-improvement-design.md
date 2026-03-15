@@ -60,10 +60,9 @@
 
 ### 기존 DiarizationSetupDialog과의 관계
 
-- `DiarizationSetupDialog`는 **HuggingFace 토큰 설정 전용**으로 유지
+- `DiarizationSetupDialog`는 **제거** — 기능이 `SettingsDialog` 화자 분리 탭으로 흡수됨 (settings-dialog 스펙 참조)
 - 새로운 `TranscriptionSettingsDialog`가 **트랜스크립션 시작 전 설정**을 담당
-- 흐름: 파일 추가 → `TranscriptionSettingsDialog` → 화자 분리 체크 + 토큰 없음 → `DiarizationSetupDialog` 호출 → 돌아와서 시작
-- 즉 기존 다이얼로그를 합치지 않고, 각자의 역할을 분리하여 유지
+- 흐름: 파일 추가 → `TranscriptionSettingsDialog` → 화자 분리 체크 + 토큰 없음 → `SettingsDialog` 화자 분리 탭으로 안내 → 돌아와서 `get_hf_token()` 재확인 후 시작
 
 ---
 

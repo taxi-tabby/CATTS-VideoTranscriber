@@ -67,6 +67,19 @@
 
 - "저장": 변경된 설정을 config.json에 저장 후 닫기
 - "취소": 변경 사항 버리고 닫기
+- 모달 다이얼로그, 최소 너비 520px
+
+### DB 경로 접근
+
+`Database` 클래스에 `db_path` 속성을 추가하여 경로를 노출한다. `SettingsDialog` 생성 시 이 경로를 전달받는다.
+
+### get_whisper_model() 기본값
+
+`get_whisper_model()`은 config.json에 키가 없을 때 `"medium"`을 반환한다:
+```python
+def get_whisper_model() -> str:
+    return load_config().get("whisper_model", "medium")
+```
 
 ---
 
@@ -87,6 +100,7 @@
   설정 버튼 → SettingsDialog (모든 설정)
   파일 추가 → TranscriptionSettingsDialog (diarization-accuracy 스펙)
            → (화자 분리 체크 + 토큰 없으면) SettingsDialog 화자 분리 탭으로 안내
+           → SettingsDialog 닫힌 후 get_hf_token() 재확인 → 토큰 있으면 진행, 없으면 화자 분리 없이 진행할지 확인
 ```
 
 ### config.json
