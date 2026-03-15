@@ -336,6 +336,31 @@ class TranscriptionSettingsDialog(QDialog):
         model_layout.addStretch()
         layout.addWidget(grp_model)
 
+        # 언어 선택
+        grp_lang = QGroupBox("언어")
+        lang_layout = QHBoxLayout(grp_lang)
+        lang_layout.addWidget(QLabel("언어:"))
+        self.combo_lang = QComboBox()
+        self._languages = [
+            ("auto", "자동 감지"),
+            ("ko", "한국어"),
+            ("en", "English"),
+            ("ja", "日本語"),
+            ("zh", "中文"),
+            ("es", "Español"),
+            ("fr", "Français"),
+            ("de", "Deutsch"),
+            ("ru", "Русский"),
+            ("pt", "Português"),
+            ("it", "Italiano"),
+        ]
+        for code, name in self._languages:
+            self.combo_lang.addItem(name, code)
+        self.combo_lang.setCurrentIndex(1)  # 기본값: 한국어
+        lang_layout.addWidget(self.combo_lang)
+        lang_layout.addStretch()
+        layout.addWidget(grp_lang)
+
         grp_diar = QGroupBox("화자 분리")
         diar_layout = QVBoxLayout(grp_diar)
 
@@ -451,8 +476,11 @@ class TranscriptionSettingsDialog(QDialog):
                 min_speakers = self.spin_min.value()
                 max_speakers = self.spin_max.value()
 
+        language = self.combo_lang.currentData()
+
         return {
             "model_name": model,
+            "language": language,
             "use_diarization": use_diar,
             "num_speakers": num_speakers,
             "min_speakers": min_speakers,
@@ -562,6 +590,9 @@ class MainWindow(QMainWindow):
         self.btn_speakers.setVisible(False)
         btn_row.addWidget(self.btn_speakers)
         btn_row.addStretch()
+        self.btn_export = QPushButton("내보내기")
+        self.btn_export.clicked.connect(self._on_export)
+        btn_row.addWidget(self.btn_export)
         self.btn_copy = QPushButton("텍스트 복사")
         self.btn_copy.clicked.connect(self._on_copy)
         btn_row.addWidget(self.btn_copy)
@@ -599,6 +630,7 @@ class MainWindow(QMainWindow):
         self.lbl_info.setVisible(show)
         self.tabs.setVisible(show)
         self.btn_copy.setVisible(show)
+        self.btn_export.setVisible(show)
         self.btn_speakers.setVisible(False)
         self.lbl_empty.setVisible(not show)
 
@@ -713,6 +745,7 @@ class MainWindow(QMainWindow):
             use_diarization=settings["use_diarization"],
             hf_token=hf_token,
             model_name=settings.get("model_name", "medium"),
+            language=settings.get("language", "ko"),
             num_speakers=settings.get("num_speakers"),
             min_speakers=settings.get("min_speakers"),
             max_speakers=settings.get("max_speakers"),
@@ -865,6 +898,52 @@ class MainWindow(QMainWindow):
             self.db.delete_transcription(tid)
             self._load_list()
             self._show_detail(False)
+
+    def _on_export(self):
+        if self._current_tid is None:
+            return
+        data = self.db.get_transcription(self._current_tid)
+        if not data:
+            return
+
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "내보내기",
+            os.path.splitext(data["filename"])[0],
+            "SRT 자막 (*.srt);;텍스트 파일 (*.txt)",
+        )
+        if not path:
+            return
+
+        segments = data.get("segments", [])
+        if selected_filter.startswith("SRT"):
+            content = self._build_srt(segments)
+        else:
+            content = self._build_full_text(segments)
+
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        self.lbl_status.setVisible(True)
+        self.lbl_status.setText(f"저장 완료: {os.path.basename(path)}")
+        QTimer.singleShot(3000, lambda: self.lbl_status.setVisible(False))
+
+    @staticmethod
+    def _format_srt_time(seconds: float) -> str:
+        h, rem = divmod(int(seconds), 3600)
+        m, s = divmod(rem, 60)
+        ms = int((seconds - int(seconds)) * 1000)
+        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+    def _build_srt(self, segments: list[dict]) -> str:
+        lines = []
+        for i, seg in enumerate(segments, 1):
+            start = self._format_srt_time(seg["start"])
+            end = self._format_srt_time(seg["end"])
+            speaker = seg.get("speaker")
+            text = f"[{speaker}] {seg['text']}" if speaker else seg["text"]
+            lines.append(f"{i}\n{start} --> {end}\n{text}\n")
+        return "\n".join(lines)
 
     def _on_copy(self):
         current_tab = self.tabs.currentIndex()

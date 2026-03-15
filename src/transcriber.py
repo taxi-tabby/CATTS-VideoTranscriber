@@ -62,6 +62,7 @@ class TranscriberWorker(QObject):
         use_diarization: bool = False,
         hf_token: str | None = None,
         model_name: str = "medium",
+        language: str = "ko",
         num_speakers: int | None = None,
         min_speakers: int | None = None,
         max_speakers: int | None = None,
@@ -71,6 +72,7 @@ class TranscriberWorker(QObject):
         self.use_diarization = use_diarization
         self.hf_token = hf_token
         self.model_name = model_name
+        self.language = language
         self.num_speakers = num_speakers
         self.min_speakers = min_speakers
         self.max_speakers = max_speakers
@@ -151,7 +153,7 @@ class TranscriberWorker(QObject):
                     prompt = _SPECIAL_TOKEN_RE.sub("", prompt).strip() or None
 
                 result = model.transcribe(
-                    chunk, language="ko", verbose=False,
+                    chunk, language=self.language if self.language != "auto" else None, verbose=False,
                     initial_prompt=prompt,
                 )
 
