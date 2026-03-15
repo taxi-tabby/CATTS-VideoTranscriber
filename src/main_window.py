@@ -182,6 +182,19 @@ class SettingsDialog(QDialog):
         data_layout.addWidget(btn_open)
         general_layout.addWidget(grp_data)
 
+        # 모델 캐시 위치
+        grp_cache = QGroupBox("모델 캐시 위치")
+        cache_layout = QVBoxLayout(grp_cache)
+        cache_folder = os.path.join(os.path.expanduser("~"), ".cache", "whisper")
+        lbl_cache = QLabel(cache_folder)
+        lbl_cache.setWordWrap(True)
+        lbl_cache.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        cache_layout.addWidget(lbl_cache)
+        btn_open_cache = QPushButton("폴더 열기")
+        btn_open_cache.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(cache_folder)))
+        cache_layout.addWidget(btn_open_cache)
+        general_layout.addWidget(grp_cache)
+
         general_layout.addStretch()
         tabs.addTab(general_tab, "일반")
 
