@@ -1,10 +1,12 @@
 import os
 import webbrowser
 
-from PySide6.QtCore import Qt, QThread, QTimer
+from PySide6.QtCore import Qt, QThread, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -20,13 +22,14 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSpinBox,
     QSplitter,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from src.config import get_hf_token, set_hf_token, delete_hf_token
+from src.config import get_hf_token, set_hf_token, delete_hf_token, get_whisper_model, set_whisper_model
 from src.database import Database
 from src.transcriber import TranscriberWorker
 
@@ -46,106 +49,118 @@ def format_timestamp(seconds: float) -> str:
 
 
 # ────────────────────────────────────────────
-# 화자 분리 설정 다이얼로그
+# 설정 다이얼로그
 # ────────────────────────────────────────────
 
-class DiarizationSetupDialog(QDialog):
-    """화자 분리 사전 설정 다이얼로그.
-
-    - HuggingFace 토큰 입력/저장/검증
-    - 라이선스 동의 페이지 링크
-    - 토큰 유효성 검사
-    """
+class SettingsDialog(QDialog):
+    """앱 설정 다이얼로그. 일반 + 화자 분리 탭."""
 
     HF_MODELS = [
         ("pyannote/speaker-diarization-3.1", "https://hf.co/pyannote/speaker-diarization-3.1"),
         ("pyannote/segmentation-3.0", "https://hf.co/pyannote/segmentation-3.0"),
     ]
 
-    def __init__(self, parent=None):
+    WHISPER_MODELS = ["tiny", "base", "small", "medium", "large-v3"]
+
+    def __init__(self, db_path: str, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("화자 분리 설정")
+        self.setWindowTitle("설정")
         self.setMinimumWidth(520)
-        self._build_ui()
+        self._build_ui(db_path)
 
-    def _build_ui(self):
+    def _build_ui(self, db_path: str):
         layout = QVBoxLayout(self)
+        tabs = QTabWidget()
 
-        # ── 1단계: 라이선스 동의 ──
-        grp_license = QGroupBox("1단계: 모델 라이선스 동의 (최초 1회)")
-        license_layout = QVBoxLayout(grp_license)
+        # ── 일반 탭 ──
+        general_tab = QWidget()
+        general_layout = QVBoxLayout(general_tab)
 
-        lbl_license = QLabel(
-            "아래 두 모델 페이지에서 각각 라이선스에 동의해야 합니다.\n"
-            "이미 동의했다면 이 단계를 건너뛰세요."
-        )
-        lbl_license.setWordWrap(True)
-        license_layout.addWidget(lbl_license)
+        grp_whisper = QGroupBox("Whisper 모델")
+        whisper_layout = QHBoxLayout(grp_whisper)
+        whisper_layout.addWidget(QLabel("기본 모델:"))
+        self.combo_model = QComboBox()
+        self.combo_model.addItems(self.WHISPER_MODELS)
+        current_model = get_whisper_model()
+        idx = self.combo_model.findText(current_model)
+        if idx >= 0:
+            self.combo_model.setCurrentIndex(idx)
+        whisper_layout.addWidget(self.combo_model)
+        whisper_layout.addStretch()
+        general_layout.addWidget(grp_whisper)
 
-        for model_name, url in self.HF_MODELS:
-            btn_row = QHBoxLayout()
-            btn = QPushButton(f"  {model_name} 페이지 열기")
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(lambda _, u=url: webbrowser.open(u))
-            btn_row.addWidget(btn)
-            btn_row.addStretch()
-            license_layout.addLayout(btn_row)
+        grp_data = QGroupBox("데이터 저장 위치")
+        data_layout = QVBoxLayout(grp_data)
+        db_folder = os.path.dirname(db_path)
+        lbl_path = QLabel(db_folder)
+        lbl_path.setWordWrap(True)
+        lbl_path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        data_layout.addWidget(lbl_path)
+        btn_open = QPushButton("폴더 열기")
+        btn_open.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(db_folder)))
+        data_layout.addWidget(btn_open)
+        general_layout.addWidget(grp_data)
 
-        layout.addWidget(grp_license)
+        general_layout.addStretch()
+        tabs.addTab(general_tab, "일반")
 
-        # ── 2단계: 토큰 입력 ──
-        grp_token = QGroupBox("2단계: HuggingFace 토큰 입력")
+        # ── 화자 분리 탭 ──
+        diar_tab = QWidget()
+        diar_layout = QVBoxLayout(diar_tab)
+
+        grp_token = QGroupBox("HuggingFace 토큰")
         token_layout = QVBoxLayout(grp_token)
 
-        btn_token_page = QPushButton("  토큰 발급 페이지 열기 (huggingface.co/settings/tokens)")
-        btn_token_page.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_token_page.clicked.connect(lambda: webbrowser.open("https://huggingface.co/settings/tokens"))
-        token_layout.addWidget(btn_token_page)
-
         token_input_row = QHBoxLayout()
-        lbl_token = QLabel("토큰:")
+        token_input_row.addWidget(QLabel("토큰:"))
         self.edit_token = QLineEdit()
         self.edit_token.setEchoMode(QLineEdit.EchoMode.Password)
         self.edit_token.setPlaceholderText("hf_...")
-
-        # 기존 토큰이 있으면 표시
         existing = get_hf_token()
         if existing:
             self.edit_token.setText(existing)
-
-        token_input_row.addWidget(lbl_token)
         token_input_row.addWidget(self.edit_token, stretch=1)
         token_layout.addLayout(token_input_row)
 
-        # 토큰 검증 버튼
         verify_row = QHBoxLayout()
         self.btn_verify = QPushButton("토큰 검증")
         self.btn_verify.clicked.connect(self._on_verify)
+        self.btn_delete_token = QPushButton("토큰 삭제")
+        self.btn_delete_token.clicked.connect(self._on_delete_token)
         self.lbl_verify_result = QLabel("")
         verify_row.addWidget(self.btn_verify)
+        verify_row.addWidget(self.btn_delete_token)
         verify_row.addWidget(self.lbl_verify_result, stretch=1)
         token_layout.addLayout(verify_row)
 
-        layout.addWidget(grp_token)
+        diar_layout.addWidget(grp_token)
 
-        # ── 3단계: 시작 ──
+        grp_license = QGroupBox("모델 라이선스 동의")
+        license_layout = QVBoxLayout(grp_license)
+        lbl_license = QLabel("아래 모델 페이지에서 각각 라이선스에 동의해야 합니다.")
+        lbl_license.setWordWrap(True)
+        license_layout.addWidget(lbl_license)
+        for model_name, url in self.HF_MODELS:
+            btn = QPushButton(f"  {model_name} 페이지 열기")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _, u=url: webbrowser.open(u))
+            license_layout.addWidget(btn)
+        diar_layout.addWidget(grp_license)
+
+        diar_layout.addStretch()
+        tabs.addTab(diar_tab, "화자 분리")
+
+        layout.addWidget(tabs)
+
         btn_layout = QHBoxLayout()
-
-        self.btn_delete_token = QPushButton("저장된 토큰 삭제")
-        self.btn_delete_token.clicked.connect(self._on_delete_token)
-        btn_layout.addWidget(self.btn_delete_token)
-
         btn_layout.addStretch()
-
         btn_cancel = QPushButton("취소")
         btn_cancel.clicked.connect(self.reject)
         btn_layout.addWidget(btn_cancel)
-
-        self.btn_start = QPushButton("화자 분리 시작")
-        self.btn_start.setDefault(True)
-        self.btn_start.clicked.connect(self._on_start)
-        btn_layout.addWidget(self.btn_start)
-
+        btn_save = QPushButton("저장")
+        btn_save.setDefault(True)
+        btn_save.clicked.connect(self._on_save)
+        btn_layout.addWidget(btn_save)
         layout.addLayout(btn_layout)
 
     def _on_verify(self):
@@ -163,7 +178,6 @@ class DiarizationSetupDialog(QDialog):
         try:
             import huggingface_hub
             api = huggingface_hub.HfApi(token=token)
-            # 모델 접근 권한 확인
             api.model_info("pyannote/speaker-diarization-3.1")
             api.model_info("pyannote/segmentation-3.0")
             self.lbl_verify_result.setText("토큰 유효! 두 모델 모두 접근 가능합니다.")
@@ -171,11 +185,11 @@ class DiarizationSetupDialog(QDialog):
         except Exception as e:
             err = str(e)
             if "401" in err or "Unauthorized" in err:
-                self.lbl_verify_result.setText("토큰이 유효하지 않습니다. 다시 확인하세요.")
+                self.lbl_verify_result.setText("토큰이 유효하지 않습니다.")
             elif "403" in err or "Access" in err or "gated" in err.lower():
-                self.lbl_verify_result.setText("모델 라이선스 동의가 필요합니다. 1단계를 완료하세요.")
+                self.lbl_verify_result.setText("모델 라이선스 동의가 필요합니다.")
             elif "404" in err:
-                self.lbl_verify_result.setText("모델을 찾을 수 없습니다. 라이선스 동의를 확인하세요.")
+                self.lbl_verify_result.setText("모델을 찾을 수 없습니다.")
             else:
                 self.lbl_verify_result.setText(f"오류: {err[:100]}")
             self.lbl_verify_result.setStyleSheet("color: red;")
@@ -185,19 +199,170 @@ class DiarizationSetupDialog(QDialog):
     def _on_delete_token(self):
         delete_hf_token()
         self.edit_token.clear()
-        self.lbl_verify_result.setText("저장된 토큰이 삭제되었습니다.")
+        self.lbl_verify_result.setText("토큰이 삭제되었습니다.")
         self.lbl_verify_result.setStyleSheet("color: gray;")
 
-    def _on_start(self):
+    def _on_save(self):
+        set_whisper_model(self.combo_model.currentText())
         token = self.edit_token.text().strip()
-        if not token:
-            QMessageBox.warning(self, "토큰 필요", "HuggingFace 토큰을 입력하세요.")
-            return
-        set_hf_token(token)
+        if token:
+            set_hf_token(token)
         self.accept()
 
-    def get_token(self) -> str | None:
-        return self.edit_token.text().strip() or None
+
+# ────────────────────────────────────────────
+# 트랜스크립션 설정 다이얼로그
+# ────────────────────────────────────────────
+
+class TranscriptionSettingsDialog(QDialog):
+    """트랜스크립션 시작 전 설정 다이얼로그."""
+
+    WHISPER_MODELS = ["tiny", "base", "small", "medium", "large-v3"]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("트랜스크립션 설정")
+        self.setMinimumWidth(450)
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        grp_model = QGroupBox("Whisper 모델")
+        model_layout = QHBoxLayout(grp_model)
+        model_layout.addWidget(QLabel("모델:"))
+        self.combo_model = QComboBox()
+        self.combo_model.addItems(self.WHISPER_MODELS)
+        current = get_whisper_model()
+        idx = self.combo_model.findText(current)
+        if idx >= 0:
+            self.combo_model.setCurrentIndex(idx)
+        model_layout.addWidget(self.combo_model)
+        model_layout.addStretch()
+        layout.addWidget(grp_model)
+
+        grp_diar = QGroupBox("화자 분리")
+        diar_layout = QVBoxLayout(grp_diar)
+
+        self.chk_diarization = QCheckBox("화자 분리 사용")
+        self.chk_diarization.toggled.connect(self._on_diar_toggled)
+        diar_layout.addWidget(self.chk_diarization)
+
+        self.speaker_widget = QWidget()
+        speaker_layout = QVBoxLayout(self.speaker_widget)
+        speaker_layout.setContentsMargins(20, 0, 0, 0)
+
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("화자 수:"))
+        self.combo_speaker_mode = QComboBox()
+        self.combo_speaker_mode.addItems(["자동 감지", "직접 지정"])
+        self.combo_speaker_mode.currentIndexChanged.connect(self._on_speaker_mode_changed)
+        mode_row.addWidget(self.combo_speaker_mode)
+        mode_row.addStretch()
+        speaker_layout.addLayout(mode_row)
+
+        self.manual_widget = QWidget()
+        manual_layout = QVBoxLayout(self.manual_widget)
+        manual_layout.setContentsMargins(0, 0, 0, 0)
+
+        exact_row = QHBoxLayout()
+        self.chk_exact = QCheckBox("정확한 화자 수:")
+        self.chk_exact.toggled.connect(self._on_exact_toggled)
+        self.spin_exact = QSpinBox()
+        self.spin_exact.setRange(1, 20)
+        self.spin_exact.setValue(2)
+        self.spin_exact.setEnabled(False)
+        exact_row.addWidget(self.chk_exact)
+        exact_row.addWidget(self.spin_exact)
+        exact_row.addStretch()
+        manual_layout.addLayout(exact_row)
+
+        self.range_widget = QWidget()
+        range_layout = QHBoxLayout(self.range_widget)
+        range_layout.setContentsMargins(0, 0, 0, 0)
+        range_layout.addWidget(QLabel("최소:"))
+        self.spin_min = QSpinBox()
+        self.spin_min.setRange(1, 20)
+        self.spin_min.setValue(1)
+        range_layout.addWidget(self.spin_min)
+        range_layout.addWidget(QLabel("최대:"))
+        self.spin_max = QSpinBox()
+        self.spin_max.setRange(1, 20)
+        self.spin_max.setValue(10)
+        range_layout.addWidget(self.spin_max)
+        range_layout.addStretch()
+        manual_layout.addWidget(self.range_widget)
+
+        self.lbl_warning = QLabel("")
+        self.lbl_warning.setStyleSheet("color: red;")
+        manual_layout.addWidget(self.lbl_warning)
+
+        self.manual_widget.setVisible(False)
+        speaker_layout.addWidget(self.manual_widget)
+
+        self.speaker_widget.setVisible(False)
+        diar_layout.addWidget(self.speaker_widget)
+
+        layout.addWidget(grp_diar)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_cancel = QPushButton("취소")
+        btn_cancel.clicked.connect(self.reject)
+        btn_layout.addWidget(btn_cancel)
+        self.btn_start = QPushButton("시작")
+        self.btn_start.setDefault(True)
+        self.btn_start.clicked.connect(self.accept)
+        btn_layout.addWidget(self.btn_start)
+        layout.addLayout(btn_layout)
+
+        self.spin_min.valueChanged.connect(self._validate)
+        self.spin_max.valueChanged.connect(self._validate)
+
+    def _on_diar_toggled(self, checked: bool):
+        self.speaker_widget.setVisible(checked)
+
+    def _on_speaker_mode_changed(self, index: int):
+        self.manual_widget.setVisible(index == 1)
+
+    def _on_exact_toggled(self, checked: bool):
+        self.spin_exact.setEnabled(checked)
+        self.range_widget.setEnabled(not checked)
+        self._validate()
+
+    def _validate(self):
+        if self.chk_exact.isChecked():
+            self.lbl_warning.setText("")
+            self.btn_start.setEnabled(True)
+            return
+        if self.spin_min.value() > self.spin_max.value():
+            self.lbl_warning.setText("최소 화자 수가 최대보다 클 수 없습니다.")
+            self.btn_start.setEnabled(False)
+        else:
+            self.lbl_warning.setText("")
+            self.btn_start.setEnabled(True)
+
+    def get_settings(self) -> dict:
+        model = self.combo_model.currentText()
+        use_diar = self.chk_diarization.isChecked()
+        num_speakers = None
+        min_speakers = None
+        max_speakers = None
+
+        if use_diar and self.combo_speaker_mode.currentIndex() == 1:
+            if self.chk_exact.isChecked():
+                num_speakers = self.spin_exact.value()
+            else:
+                min_speakers = self.spin_min.value()
+                max_speakers = self.spin_max.value()
+
+        return {
+            "model_name": model,
+            "use_diarization": use_diar,
+            "num_speakers": num_speakers,
+            "min_speakers": min_speakers,
+            "max_speakers": max_speakers,
+        }
 
 
 # ────────────────────────────────────────────
@@ -250,8 +415,8 @@ class MainWindow(QMainWindow):
         self.btn_delete.clicked.connect(self._on_delete)
         left_btn_row.addWidget(self.btn_delete)
 
-        self.btn_settings = QPushButton("화자 분리 설정")
-        self.btn_settings.clicked.connect(self._on_diarization_settings)
+        self.btn_settings = QPushButton("설정")
+        self.btn_settings.clicked.connect(self._on_settings)
         left_btn_row.addWidget(self.btn_settings)
 
         left_layout.addLayout(left_btn_row)
@@ -411,9 +576,8 @@ class MainWindow(QMainWindow):
 
     # --- Actions ---
 
-    def _on_diarization_settings(self):
-        """화자 분리 설정 다이얼로그를 독립적으로 열기."""
-        dialog = DiarizationSetupDialog(self)
+    def _on_settings(self):
+        dialog = SettingsDialog(self.db.db_path, self)
         dialog.exec()
 
     def _on_add_video(self):
@@ -430,48 +594,42 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
-        # 화자 분리 사용 여부 확인
-        use_diarization = False
-        hf_token = None
-        reply = QMessageBox.question(
-            self,
-            "화자 분리",
-            "화자 분리 기능을 사용하시겠습니까?\n(화자별로 발언을 구분합니다)",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            hf_token = get_hf_token()
+        settings_dialog = TranscriptionSettingsDialog(self)
+        if settings_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
 
+        settings = settings_dialog.get_settings()
+        hf_token = None
+
+        if settings["use_diarization"]:
+            hf_token = get_hf_token()
             if not hf_token:
-                # 토큰 없음 → 설정 다이얼로그 열기
-                dialog = DiarizationSetupDialog(self)
-                if dialog.exec() != QDialog.DialogCode.Accepted:
-                    # 취소 → 화자 분리 없이 진행할지 확인
-                    reply2 = QMessageBox.question(
-                        self,
-                        "화자 분리 없이 진행",
-                        "화자 분리 없이 텍스트 변환만 진행하시겠습니까?",
+                QMessageBox.information(
+                    self, "토큰 필요",
+                    "화자 분리에는 HuggingFace 토큰이 필요합니다.\n설정에서 토큰을 먼저 등록하세요.",
+                )
+                dialog = SettingsDialog(self.db.db_path, self)
+                dialog.exec()
+                hf_token = get_hf_token()
+                if not hf_token:
+                    reply = QMessageBox.question(
+                        self, "화자 분리 없이 진행",
+                        "토큰이 없어 화자 분리를 사용할 수 없습니다.\n텍스트 변환만 진행하시겠습니까?",
                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     )
-                    if reply2 == QMessageBox.StandardButton.No:
+                    if reply == QMessageBox.StandardButton.No:
                         return
-                    # Yes → 화자 분리 없이 진행
-                else:
-                    hf_token = dialog.get_token()
+                    settings["use_diarization"] = False
 
-            if hf_token:
-                use_diarization = True
+        self._start_transcription(path, settings, hf_token)
 
-        self._start_transcription(path, use_diarization, hf_token)
-
-    def _start_transcription(self, video_path: str, use_diarization: bool = False, hf_token: str | None = None):
+    def _start_transcription(self, video_path: str, settings: dict, hf_token: str | None = None):
         self.btn_add.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.lbl_status.setVisible(True)
         self.lbl_status.setText("준비 중...")
 
-        # Show right panel with live transcription
         self._show_detail(True)
         self.lbl_title.setText(os.path.basename(video_path))
         self.lbl_info.setText("변환 진행 중...")
@@ -480,7 +638,15 @@ class MainWindow(QMainWindow):
         self._live_segments = []
 
         self._thread = QThread()
-        self._worker = TranscriberWorker(video_path, use_diarization, hf_token)
+        self._worker = TranscriberWorker(
+            video_path,
+            use_diarization=settings["use_diarization"],
+            hf_token=hf_token,
+            model_name=settings.get("model_name", "medium"),
+            num_speakers=settings.get("num_speakers"),
+            min_speakers=settings.get("min_speakers"),
+            max_speakers=settings.get("max_speakers"),
+        )
         self._worker.moveToThread(self._thread)
 
         self._thread.started.connect(self._worker.run)
@@ -591,10 +757,24 @@ class MainWindow(QMainWindow):
         form.addRow(buttons)
 
         if dialog.exec() == QDialog.DialogCode.Accepted:
+            renames = {}
             for old_name, edit in edits.items():
                 new_name = edit.text().strip()
                 if new_name and new_name != old_name:
-                    self.db.update_speaker_name(self._current_tid, old_name, new_name)
+                    renames[old_name] = new_name
+
+            if renames:
+                # Use temp names to avoid conflicts when swapping
+                # (e.g. "화자 1"→"화자 2" and "화자 2"→"화자 1")
+                import uuid
+                temp_map = {}
+                for old_name in renames:
+                    temp_name = f"__temp_{uuid.uuid4().hex[:8]}"
+                    self.db.update_speaker_name(self._current_tid, old_name, temp_name)
+                    temp_map[temp_name] = renames[old_name]
+                for temp_name, new_name in temp_map.items():
+                    self.db.update_speaker_name(self._current_tid, temp_name, new_name)
+
             # Refresh display
             self._on_select_item(self.list_widget.currentRow())
 
