@@ -88,7 +88,8 @@ class TranscriberWorker(QObject):
             use_diar = self.use_diarization and self.hf_token
 
             # Step 1: Extract audio
-            self.progress.emit(5, "음성 추출 중...")
+            step_total = 5 if use_diar else 4
+            self.progress.emit(5, f"[1/{step_total}] 음성 추출 중...")
             tmp_wav = os.path.join(
                 tempfile.gettempdir(),
                 f"vt_{os.path.basename(self.video_path)}.wav",
@@ -98,7 +99,7 @@ class TranscriberWorker(QObject):
                 return
 
             # Step 2: Load audio
-            self.progress.emit(8 if use_diar else 10, "오디오 로드 중...")
+            self.progress.emit(8 if use_diar else 10, f"[2/{step_total}] 오디오 로드 중...")
             audio = load_wav_as_numpy(tmp_wav)
             duration = get_video_duration(audio)
             if self._cancelled:
@@ -107,7 +108,7 @@ class TranscriberWorker(QObject):
             # Step 2.5: Speaker diarization (optional)
             diarization_segments = None
             if use_diar:
-                self.progress.emit(8, "화자 분석 중... (취소 불가)")
+                self.progress.emit(8, f"[3/{step_total}] 화자 분석 중...")
                 from src.diarizer import run_diarization
                 diarization_segments = run_diarization(
                     tmp_wav, self.hf_token,
@@ -119,9 +120,10 @@ class TranscriberWorker(QObject):
                 if self._cancelled:
                     return
 
-            # Step 3: Load Whisper model
+            # Step 3 (or 4 with diar): Load Whisper model
             model_pct = 18 if use_diar else 15
-            self.progress.emit(model_pct, "Whisper 모델 로드 중... (첫 실행 시 다운로드)")
+            model_step = 4 if use_diar else 3
+            self.progress.emit(model_pct, f"[{model_step}/{step_total}] Whisper 모델 로드 중...")
             model = whisper.load_model(self.model_name)
             if self._cancelled:
                 return
@@ -146,7 +148,16 @@ class TranscriberWorker(QObject):
 
                 pct = transcribe_start + int((processed_sec / duration) * (95 - transcribe_start))
                 pct = min(pct, 95)
-                self.progress.emit(pct, f"변환 중... {processed_sec:.0f}s / {duration:.0f}s")
+
+                elapsed = time.time() - start_time
+                transcribe_step = step_total
+                if processed_sec > 0 and elapsed > 1:
+                    eta = elapsed * (duration - processed_sec) / processed_sec
+                    eta_min, eta_sec = divmod(int(eta), 60)
+                    eta_str = f" (남은 시간: {eta_min}분 {eta_sec}초)" if eta_min > 0 else f" (남은 시간: {eta_sec}초)"
+                else:
+                    eta_str = ""
+                self.progress.emit(pct, f"[{transcribe_step}/{step_total}] 변환 중... {processed_sec:.0f}s / {duration:.0f}s{eta_str}")
 
                 prompt = prev_text[-200:] if prev_text else None
                 if prompt:
