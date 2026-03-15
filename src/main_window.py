@@ -535,15 +535,25 @@ class MainWindow(QMainWindow):
         self.btn_add.clicked.connect(self._on_add_video)
         left_layout.addWidget(self.btn_add)
 
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("검색...")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.textChanged.connect(self._on_search)
+        left_layout.addWidget(self.search_edit)
+
         self.list_widget = QListWidget()
         self.list_widget.currentRowChanged.connect(self._on_select_item)
         left_layout.addWidget(self.list_widget)
 
         # Bottom buttons
         left_btn_row = QHBoxLayout()
-        self.btn_delete = QPushButton("선택 삭제")
+        self.btn_delete = QPushButton("삭제")
         self.btn_delete.clicked.connect(self._on_delete)
         left_btn_row.addWidget(self.btn_delete)
+
+        self.btn_retranscribe = QPushButton("재변환")
+        self.btn_retranscribe.clicked.connect(self._on_retranscribe)
+        left_btn_row.addWidget(self.btn_retranscribe)
 
         self.btn_settings = QPushButton("설정")
         self.btn_settings.clicked.connect(self._on_settings)
@@ -639,19 +649,32 @@ class MainWindow(QMainWindow):
     def _load_list(self):
         self.list_widget.clear()
         self._items = self.db.get_all_transcriptions()
+        search = self.search_edit.text().strip().lower() if hasattr(self, 'search_edit') else ""
         for t in self._items:
+            if search and search not in t["filename"].lower():
+                continue
             dur = format_duration(t.get("duration"))
             date = t["created_at"][:10]
-            item = QListWidgetItem(f"{t['filename']}\n{date}  {dur}")
+            model = t.get("model_name") or ""
+            lang = t.get("language") or ""
+            info_parts = [date, dur]
+            if model:
+                info_parts.append(model)
+            if lang:
+                info_parts.append(lang)
+            item = QListWidgetItem(f"{t['filename']}\n{'  '.join(info_parts)}")
             item.setData(Qt.ItemDataRole.UserRole, t["id"])
             self.list_widget.addItem(item)
 
+    def _on_search(self, _text: str):
+        self._load_list()
+
     def _on_select_item(self, row: int):
-        if row < 0 or row >= len(self._items):
+        if row < 0 or row >= self.list_widget.count():
             self._show_detail(False)
             return
 
-        tid = self._items[row]["id"]
+        tid = self.list_widget.item(row).data(Qt.ItemDataRole.UserRole)
         data = self.db.get_transcription(tid)
         if data is None:
             self._show_detail(False)
@@ -789,6 +812,8 @@ class MainWindow(QMainWindow):
             duration=result["duration"],
             full_text=result["full_text"],
             segments=result["segments"],
+            model_name=result.get("model_name"),
+            language=result.get("language"),
         )
         self._current_tid = tid
 
@@ -881,13 +906,28 @@ class MainWindow(QMainWindow):
             # Refresh display
             self._on_select_item(self.list_widget.currentRow())
 
+    def _on_retranscribe(self):
+        row = self.list_widget.currentRow()
+        if row < 0:
+            return
+        tid = self.list_widget.item(row).data(Qt.ItemDataRole.UserRole)
+        data = self.db.get_transcription(tid)
+        if not data:
+            return
+        filepath = data["filepath"]
+        if not os.path.exists(filepath):
+            QMessageBox.warning(self, "파일 없음", f"원본 파일을 찾을 수 없습니다:\n{filepath}")
+            return
+        self._add_file(filepath)
+
     def _on_delete(self):
         row = self.list_widget.currentRow()
         if row < 0:
             return
 
-        tid = self._items[row]["id"]
-        name = self._items[row]["filename"]
+        tid = self.list_widget.item(row).data(Qt.ItemDataRole.UserRole)
+        data = self.db.get_transcription(tid)
+        name = data["filename"] if data else "?"
         reply = QMessageBox.question(
             self,
             "삭제 확인",

@@ -30,15 +30,24 @@ class Database:
             );
         """)
         self._conn.commit()
-        self._migrate_add_speaker_column()
+        self._run_migrations()
 
-    def _migrate_add_speaker_column(self):
-        columns = [
+    def _run_migrations(self):
+        seg_columns = [
             row[1] for row in
             self._conn.execute("PRAGMA table_info(segments)").fetchall()
         ]
-        if "speaker" not in columns:
+        if "speaker" not in seg_columns:
             self._conn.execute("ALTER TABLE segments ADD COLUMN speaker TEXT")
+            self._conn.commit()
+
+        trans_columns = [
+            row[1] for row in
+            self._conn.execute("PRAGMA table_info(transcriptions)").fetchall()
+        ]
+        if "model_name" not in trans_columns:
+            self._conn.execute("ALTER TABLE transcriptions ADD COLUMN model_name TEXT")
+            self._conn.execute("ALTER TABLE transcriptions ADD COLUMN language TEXT")
             self._conn.commit()
 
     def add_transcription(
@@ -48,11 +57,13 @@ class Database:
         duration: float,
         full_text: str,
         segments: list[dict],
+        model_name: str | None = None,
+        language: str | None = None,
     ) -> int:
         cur = self._conn.execute(
-            """INSERT INTO transcriptions (filename, filepath, duration, created_at, full_text)
-               VALUES (?, ?, ?, ?, ?)""",
-            (filename, filepath, duration, datetime.now().isoformat(), full_text),
+            """INSERT INTO transcriptions (filename, filepath, duration, created_at, full_text, model_name, language)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (filename, filepath, duration, datetime.now().isoformat(), full_text, model_name, language),
         )
         tid = cur.lastrowid
         for seg in segments:
@@ -66,7 +77,7 @@ class Database:
 
     def get_all_transcriptions(self) -> list[dict]:
         rows = self._conn.execute(
-            "SELECT id, filename, filepath, duration, created_at FROM transcriptions ORDER BY created_at DESC"
+            "SELECT id, filename, filepath, duration, created_at, model_name, language FROM transcriptions ORDER BY created_at DESC"
         ).fetchall()
         return [dict(r) for r in rows]
 

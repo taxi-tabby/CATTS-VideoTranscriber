@@ -212,6 +212,8 @@ class TranscriberWorker(QObject):
                 "full_text": " ".join(full_text_parts),
                 "segments": all_segments,
                 "elapsed": elapsed,
+                "model_name": self.model_name,
+                "language": self.language,
             })
 
         except Exception as e:
