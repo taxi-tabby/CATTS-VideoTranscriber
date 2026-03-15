@@ -51,6 +51,20 @@
 - "정확한 화자 수"에 값을 입력하면 min/max 필드 비활성화 (상호 배타)
 - Whisper 모델 선택값은 config.json에 저장하여 다음에도 유지
 
+### 입력 검증
+
+- 화자 수 입력은 QSpinBox 사용 (정수만 허용, 최소 1, 최대 20)
+- `min_speakers > max_speakers`인 경우 "시작" 버튼 비활성화 + 경고 표시
+- `num_speakers`와 `min_speakers`/`max_speakers`는 UI에서 상호 배타 (동시 입력 불가)
+- `run_diarization()`에서도 방어적 검증: `num_speakers`가 있으면 `min/max` 무시
+
+### 기존 DiarizationSetupDialog과의 관계
+
+- `DiarizationSetupDialog`는 **HuggingFace 토큰 설정 전용**으로 유지
+- 새로운 `TranscriptionSettingsDialog`가 **트랜스크립션 시작 전 설정**을 담당
+- 흐름: 파일 추가 → `TranscriptionSettingsDialog` → 화자 분리 체크 + 토큰 없음 → `DiarizationSetupDialog` 호출 → 돌아와서 시작
+- 즉 기존 다이얼로그를 합치지 않고, 각자의 역할을 분리하여 유지
+
 ---
 
 ## 2. 화자 배정 알고리즘 개선
@@ -64,7 +78,7 @@
 1. Whisper 세그먼트와 겹치는 **모든** diarization 세그먼트를 수집
 2. 화자별로 겹침 시간을 **합산**
 3. 합산 겹침이 가장 큰 화자를 배정
-4. 동률 시 해당 구간에서 먼저 등장한 화자 선택
+4. 동률 시 해당 Whisper 세그먼트 구간 내에서 가장 이른 diarization 세그먼트 start를 가진 화자 선택
 
 ### 예시
 
@@ -121,7 +135,7 @@ diarization = pipeline(
 | base | ~74MB | 빠름 | 간단한 내용 |
 | small | ~244MB | 보통 | 일반 용도 |
 | medium | ~769MB | 느림 | 높은 정확도 |
-| large | ~1.5GB | 가장 느림 | 최고 정확도 |
+| large-v3 | ~1.5GB | 가장 느림 | 최고 정확도 |
 
 ### 변경
 
@@ -152,4 +166,5 @@ diarization = pipeline(
 | `src/transcriber.py` | `model_name`, 화자 수 파라미터 추가 |
 | `src/diarizer.py` | `run_diarization` 시그니처 확장, `assign_speakers` 알고리즘 개선 |
 | `src/config.py` | `whisper_model` getter/setter 추가 |
-| `tests/test_diarizer.py` | 가중 투표 알고리즘 테스트 추가 |
+| `tests/test_diarizer.py` | 가중 투표 알고리즘 테스트 추가 (동률 tie-break 포함) |
+| `tests/test_config.py` | `whisper_model` getter/setter 테스트 추가 |
