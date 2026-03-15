@@ -141,7 +141,7 @@ class SettingsDialog(QDialog):
         ("pyannote/segmentation-3.0", "https://hf.co/pyannote/segmentation-3.0"),
     ]
 
-    WHISPER_MODELS = ["tiny", "base", "small", "medium", "large-v3"]
+    WHISPER_MODELS = ["tiny", "base", "small", "medium", "large-v1", "large-v2", "large-v3", "turbo", "large-v3-turbo"]
 
     def __init__(self, db_path: str, parent=None, initial_tab: int = 0):
         super().__init__(parent)
@@ -312,7 +312,7 @@ class SettingsDialog(QDialog):
 class TranscriptionSettingsDialog(QDialog):
     """트랜스크립션 시작 전 설정 다이얼로그."""
 
-    WHISPER_MODELS = ["tiny", "base", "small", "medium", "large-v3"]
+    WHISPER_MODELS = ["tiny", "base", "small", "medium", "large-v1", "large-v2", "large-v3", "turbo", "large-v3-turbo"]
 
     def __init__(self, parent=None):
         super().__init__(parent)
