@@ -5,19 +5,35 @@ from collections import defaultdict
 import torch
 
 
+# 화자 분석 내부 단계 → (한글 표시, 진행률 범위 내 비율)
+_DIAR_STEPS = {
+    "segmentation": ("음성 구간 분할", 0.3),
+    "speaker_counting": ("화자 수 추정", 0.1),
+    "embeddings": ("화자 특징 추출", 0.4),
+    "discrete_diarization": ("화자 할당", 0.2),
+}
+
+
 def run_diarization(
     audio_path: str,
     hf_token: str,
     num_speakers: int | None = None,
     min_speakers: int | None = None,
     max_speakers: int | None = None,
+    progress_callback=None,
 ) -> list[dict]:
-    """pyannote.audio로 화자 분리 실행. 결과는 [{start, end, speaker}, ...] 리스트."""
+    """pyannote.audio로 화자 분리 실행. 결과는 [{start, end, speaker}, ...] 리스트.
+
+    Args:
+        progress_callback: (percent: int, message: str) 형태의 콜백.
+            percent는 0~100 범위이며, 호출측에서 전체 진행률에 매핑해야 한다.
+    """
 
     # HF_TOKEN 환경변수로 토큰 전달 — huggingface_hub가 자동으로 읽음.
-    # use_auth_token 파라미터를 사용하지 않으므로 pyannote/huggingface_hub
-    # 버전 간 호환성 문제를 완전히 우회.
     os.environ["HF_TOKEN"] = hf_token
+
+    if progress_callback:
+        progress_callback(0, "화자 분리 모델 로드 중...")
 
     from pyannote.audio import Pipeline
 
@@ -36,6 +52,9 @@ def run_diarization(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     pipeline.to(device)
 
+    if progress_callback:
+        progress_callback(10, "화자 분석 시작...")
+
     kwargs = {}
     if num_speakers is not None:
         kwargs["num_speakers"] = num_speakers
@@ -45,6 +64,24 @@ def run_diarization(
         if max_speakers is not None:
             kwargs["max_speakers"] = max_speakers
 
+    # pyannote hook으로 진행률 보고
+    completed_pct = 10  # 모델 로드 후 시작점
+
+    def _hook(step_name, *args, **kwargs):
+        nonlocal completed_pct
+        step_info = _DIAR_STEPS.get(step_name)
+        if not step_info or not progress_callback:
+            return
+        label, ratio = step_info
+        # 이 단계가 완료됨 → 해당 비율만큼 진행
+        completed_pct = 10 + int(90 * sum(
+            r for name, (_, r) in _DIAR_STEPS.items()
+            if list(_DIAR_STEPS.keys()).index(name) <= list(_DIAR_STEPS.keys()).index(step_name)
+        ))
+        completed_pct = min(completed_pct, 95)
+        progress_callback(completed_pct, f"화자 분석: {label} 완료")
+
+    kwargs["hook"] = _hook
     diarization = pipeline(audio_path, **kwargs)
 
     segments = []
@@ -54,6 +91,9 @@ def run_diarization(
             "end": turn.end,
             "speaker": speaker,
         })
+
+    if progress_callback:
+        progress_callback(100, "화자 분석 완료")
 
     # 모델 해제 — GPU 메모리 확보
     del pipeline

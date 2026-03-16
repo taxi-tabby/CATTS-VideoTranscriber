@@ -2,7 +2,7 @@ import os
 import webbrowser
 
 from PySide6.QtCore import Qt, QThread, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QFont
+from PySide6.QtGui import QAction, QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -13,18 +13,21 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
+    # QListWidget / QListWidgetItem removed — using QTreeWidget
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QSpinBox,
     QSplitter,
     QTabWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -34,8 +37,12 @@ from src.config import (
     get_whisper_model, set_whisper_model,
     get_show_startup_guide, set_show_startup_guide,
     get_theme, set_theme,
+    get_db_dir, set_db_dir,
+    get_whisper_cache, set_whisper_cache,
+    get_hf_cache, set_hf_cache,
 )
 from src.database import Database
+from src.model_utils import get_model_display_name
 from src.transcriber import TranscriberWorker
 
 
@@ -69,7 +76,7 @@ class StartupGuideDialog(QDialog):
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
-        title = QLabel("Video Transcriber 사용 안내")
+        title = QLabel("CATTS 사용 안내")
         title.setFont(QFont("", 13, QFont.Weight.Bold))
         layout.addWidget(title)
 
@@ -86,8 +93,8 @@ class StartupGuideDialog(QDialog):
         grp_required = QGroupBox("필수")
         req_layout = QVBoxLayout(grp_required)
         req_layout.addWidget(QLabel(
-            "- 인터넷 연결: 첫 실행 시 Whisper 음성인식 모델을 다운로드합니다\n"
-            "  (모델 크기: tiny 39MB ~ large 1.5GB, 기본값 medium 769MB)\n"
+            "- 기본 모델(large-v3, 1.5GB)이 프로그램에 포함되어 있습니다\n"
+            "- 다른 모델을 사용하려면 인터넷 연결이 필요합니다 (자동 다운로드)\n"
             "- 다운로드된 모델은 저장되므로 이후에는 오프라인으로 사용 가능합니다"
         ))
         layout.addWidget(grp_required)
@@ -106,8 +113,9 @@ class StartupGuideDialog(QDialog):
         diar_layout = QVBoxLayout(grp_diar)
         diar_layout.addWidget(QLabel(
             "- HuggingFace 계정 및 토큰 (무료)\n"
-            "- pyannote 모델 라이선스 동의 (무료)\n"
-            "- 설정 버튼에서 토큰을 등록할 수 있습니다"
+            '- 토큰 권한: "Read access to contents of all public gated repos"\n'
+            "- pyannote 모델 라이선스 동의 (무료, 모델 페이지에서 Agree 클릭)\n"
+            "- 설정 버튼에서 토큰 등록 및 상세 안내를 확인할 수 있습니다"
         ))
         layout.addWidget(grp_diar)
 
@@ -162,11 +170,14 @@ class SettingsDialog(QDialog):
         whisper_layout = QHBoxLayout(grp_whisper)
         whisper_layout.addWidget(QLabel("기본 모델:"))
         self.combo_model = QComboBox()
-        self.combo_model.addItems(self.WHISPER_MODELS)
+        self.combo_model.setMinimumWidth(320)
         current_model = get_whisper_model()
-        idx = self.combo_model.findText(current_model)
-        if idx >= 0:
-            self.combo_model.setCurrentIndex(idx)
+        current_idx = 0
+        for i, name in enumerate(self.WHISPER_MODELS):
+            self.combo_model.addItem(get_model_display_name(name), name)
+            if name == current_model:
+                current_idx = i
+        self.combo_model.setCurrentIndex(current_idx)
         whisper_layout.addWidget(self.combo_model)
         whisper_layout.addStretch()
         general_layout.addWidget(grp_whisper)
@@ -186,33 +197,65 @@ class SettingsDialog(QDialog):
         theme_layout.addStretch()
         general_layout.addWidget(grp_theme)
 
-        grp_data = QGroupBox("데이터 저장 위치")
-        data_layout = QVBoxLayout(grp_data)
-        db_folder = os.path.dirname(db_path)
-        lbl_path = QLabel(db_folder)
-        lbl_path.setWordWrap(True)
-        lbl_path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        data_layout.addWidget(lbl_path)
-        btn_open = QPushButton("폴더 열기")
-        btn_open.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(db_folder)))
-        data_layout.addWidget(btn_open)
-        general_layout.addWidget(grp_data)
-
-        # 모델 캐시 위치
-        grp_cache = QGroupBox("모델 캐시 위치")
-        cache_layout = QVBoxLayout(grp_cache)
-        cache_folder = os.path.join(os.path.expanduser("~"), ".cache", "whisper")
-        lbl_cache = QLabel(cache_folder)
-        lbl_cache.setWordWrap(True)
-        lbl_cache.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        cache_layout.addWidget(lbl_cache)
-        btn_open_cache = QPushButton("폴더 열기")
-        btn_open_cache.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(cache_folder)))
-        cache_layout.addWidget(btn_open_cache)
-        general_layout.addWidget(grp_cache)
-
         general_layout.addStretch()
         tabs.addTab(general_tab, "일반")
+
+        # ── 저장 경로 탭 ──
+        paths_tab = QWidget()
+        paths_layout = QVBoxLayout(paths_tab)
+
+        lbl_restart = QLabel("경로 변경 후 프로그램을 다시 시작해야 적용됩니다.")
+        lbl_restart.setStyleSheet("color: #B07040; font-weight: bold;")
+        lbl_restart.setWordWrap(True)
+        paths_layout.addWidget(lbl_restart)
+
+        # DB 저장 위치
+        grp_db = QGroupBox("데이터 저장 위치 (DB)")
+        db_layout = QVBoxLayout(grp_db)
+        db_row = QHBoxLayout()
+        self.edit_db_dir = QLineEdit(get_db_dir())
+        db_row.addWidget(self.edit_db_dir, stretch=1)
+        btn_db_browse = QPushButton("변경")
+        btn_db_browse.clicked.connect(lambda: self._browse_dir(self.edit_db_dir))
+        db_row.addWidget(btn_db_browse)
+        btn_db_open = QPushButton("열기")
+        btn_db_open.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(self.edit_db_dir.text())))
+        db_row.addWidget(btn_db_open)
+        db_layout.addLayout(db_row)
+        paths_layout.addWidget(grp_db)
+
+        # Whisper 모델 캐시
+        grp_whisper_path = QGroupBox("Whisper 모델 저장 위치")
+        whisper_path_layout = QVBoxLayout(grp_whisper_path)
+        whisper_row = QHBoxLayout()
+        self.edit_whisper_cache = QLineEdit(get_whisper_cache())
+        whisper_row.addWidget(self.edit_whisper_cache, stretch=1)
+        btn_whisper_browse = QPushButton("변경")
+        btn_whisper_browse.clicked.connect(lambda: self._browse_dir(self.edit_whisper_cache))
+        whisper_row.addWidget(btn_whisper_browse)
+        btn_whisper_open = QPushButton("열기")
+        btn_whisper_open.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(self.edit_whisper_cache.text())))
+        whisper_row.addWidget(btn_whisper_open)
+        whisper_path_layout.addLayout(whisper_row)
+        paths_layout.addWidget(grp_whisper_path)
+
+        # HuggingFace 모델 캐시 (화자 분리)
+        grp_hf_path = QGroupBox("화자 분리 모델 저장 위치 (HuggingFace)")
+        hf_path_layout = QVBoxLayout(grp_hf_path)
+        hf_row = QHBoxLayout()
+        self.edit_hf_cache = QLineEdit(get_hf_cache())
+        hf_row.addWidget(self.edit_hf_cache, stretch=1)
+        btn_hf_browse = QPushButton("변경")
+        btn_hf_browse.clicked.connect(lambda: self._browse_dir(self.edit_hf_cache))
+        hf_row.addWidget(btn_hf_browse)
+        btn_hf_open = QPushButton("열기")
+        btn_hf_open.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(self.edit_hf_cache.text())))
+        hf_row.addWidget(btn_hf_open)
+        hf_path_layout.addLayout(hf_row)
+        paths_layout.addWidget(grp_hf_path)
+
+        paths_layout.addStretch()
+        tabs.addTab(paths_tab, "저장 경로")
 
         # ── 화자 분리 탭 ──
         diar_tab = QWidget()
@@ -220,6 +263,19 @@ class SettingsDialog(QDialog):
 
         grp_token = QGroupBox("HuggingFace 토큰")
         token_layout = QVBoxLayout(grp_token)
+
+        lbl_token_guide = QLabel(
+            "화자 분리에는 HuggingFace 토큰이 필요합니다.\n"
+            "토큰 생성 시 아래 권한이 반드시 필요합니다:\n"
+            '  - "Read access to contents of all public gated repos you can access"'
+        )
+        lbl_token_guide.setWordWrap(True)
+        token_layout.addWidget(lbl_token_guide)
+
+        btn_create_token = QPushButton("HuggingFace 토큰 생성 페이지 열기")
+        btn_create_token.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_create_token.clicked.connect(lambda: webbrowser.open("https://huggingface.co/settings/tokens"))
+        token_layout.addWidget(btn_create_token)
 
         token_input_row = QHBoxLayout()
         token_input_row.addWidget(QLabel("토큰:"))
@@ -245,9 +301,12 @@ class SettingsDialog(QDialog):
 
         diar_layout.addWidget(grp_token)
 
-        grp_license = QGroupBox("모델 라이선스 동의")
+        grp_license = QGroupBox("모델 라이선스 동의 (필수)")
         license_layout = QVBoxLayout(grp_license)
-        lbl_license = QLabel("아래 모델 페이지에서 각각 라이선스에 동의해야 합니다.")
+        lbl_license = QLabel(
+            "아래 두 모델 페이지에 각각 접속하여 라이선스에 동의해야 합니다.\n"
+            "(HuggingFace 로그인 후 모델 페이지 상단의 'Agree' 버튼 클릭)"
+        )
         lbl_license.setWordWrap(True)
         license_layout.addWidget(lbl_license)
         for model_name, url in self.HF_MODELS:
@@ -296,11 +355,19 @@ class SettingsDialog(QDialog):
         except Exception as e:
             err = str(e)
             if "401" in err or "Unauthorized" in err:
-                self.lbl_verify_result.setText("토큰이 유효하지 않습니다.")
+                self.lbl_verify_result.setText(
+                    "토큰이 유효하지 않습니다. 토큰 값을 다시 확인하세요."
+                )
             elif "403" in err or "Access" in err or "gated" in err.lower():
-                self.lbl_verify_result.setText("모델 라이선스 동의가 필요합니다.")
+                self.lbl_verify_result.setText(
+                    "모델 접근 불가: 아래 모델 페이지에서 라이선스에 동의하세요."
+                )
             elif "404" in err:
                 self.lbl_verify_result.setText("모델을 찾을 수 없습니다.")
+            elif "locate" in err.lower() or "connection" in err.lower():
+                self.lbl_verify_result.setText(
+                    "인터넷 연결을 확인하세요."
+                )
             else:
                 self.lbl_verify_result.setText(f"오류: {err[:100]}")
             self.lbl_verify_result.setStyleSheet("color: red;")
@@ -313,16 +380,39 @@ class SettingsDialog(QDialog):
         self.lbl_verify_result.setText("토큰이 삭제되었습니다.")
         self.lbl_verify_result.setStyleSheet("color: gray;")
 
+    def _browse_dir(self, line_edit: QLineEdit):
+        current = line_edit.text()
+        path = QFileDialog.getExistingDirectory(self, "폴더 선택", current)
+        if path:
+            line_edit.setText(path)
+
     def _on_save(self):
-        set_whisper_model(self.combo_model.currentText())
+        set_whisper_model(self.combo_model.currentData())
         new_theme = self.combo_theme.currentData()
         old_theme = get_theme()
         set_theme(new_theme)
         token = self.edit_token.text().strip()
         if token:
             set_hf_token(token)
-        if new_theme != old_theme:
-            QMessageBox.information(self, "테마 변경", "테마 변경은 프로그램을 다시 시작하면 적용됩니다.")
+
+        # 경로 저장
+        need_restart = False
+        new_db = self.edit_db_dir.text().strip()
+        new_whisper = self.edit_whisper_cache.text().strip()
+        new_hf = self.edit_hf_cache.text().strip()
+
+        if new_db and new_db != get_db_dir():
+            set_db_dir(new_db)
+            need_restart = True
+        if new_whisper and new_whisper != get_whisper_cache():
+            set_whisper_cache(new_whisper)
+            need_restart = True
+        if new_hf and new_hf != get_hf_cache():
+            set_hf_cache(new_hf)
+            need_restart = True
+
+        if need_restart or new_theme != old_theme:
+            QMessageBox.information(self, "재시작 필요", "변경된 설정은 프로그램을 다시 시작하면 적용됩니다.")
         self.accept()
 
 
@@ -348,11 +438,14 @@ class TranscriptionSettingsDialog(QDialog):
         model_layout = QHBoxLayout(grp_model)
         model_layout.addWidget(QLabel("모델:"))
         self.combo_model = QComboBox()
-        self.combo_model.addItems(self.WHISPER_MODELS)
+        self.combo_model.setMinimumWidth(320)
         current = get_whisper_model()
-        idx = self.combo_model.findText(current)
-        if idx >= 0:
-            self.combo_model.setCurrentIndex(idx)
+        current_idx = 0
+        for i, name in enumerate(self.WHISPER_MODELS):
+            self.combo_model.addItem(get_model_display_name(name), name)
+            if name == current:
+                current_idx = i
+        self.combo_model.setCurrentIndex(current_idx)
         model_layout.addWidget(self.combo_model)
         model_layout.addStretch()
         layout.addWidget(grp_model)
@@ -484,7 +577,7 @@ class TranscriptionSettingsDialog(QDialog):
             self.btn_start.setEnabled(True)
 
     def get_settings(self) -> dict:
-        model = self.combo_model.currentText()
+        model = self.combo_model.currentData()
         use_diar = self.chk_diarization.isChecked()
         num_speakers = None
         min_speakers = None
@@ -520,6 +613,10 @@ class MainWindow(QMainWindow):
         self._worker = None
         self._thread = None
         self._current_tid = None
+        self._live_item = None          # 변환 중 목록 항목 (QTreeWidgetItem)
+        self._live_filename = ""        # 변환 중 파일명
+        self._live_segments = []        # 변환 중 세그먼트 누적
+        self._live_timeline_text = ""   # 변환 중 타임라인 텍스트
 
         self.setWindowTitle("CATTS - Video Transcriber")
         self.setMinimumSize(900, 600)
@@ -562,9 +659,16 @@ class MainWindow(QMainWindow):
         self.search_edit.textChanged.connect(self._on_search)
         left_layout.addWidget(self.search_edit)
 
-        self.list_widget = QListWidget()
-        self.list_widget.currentRowChanged.connect(self._on_select_item)
-        left_layout.addWidget(self.list_widget)
+        self.tree_widget = QTreeWidget()
+        self.tree_widget.setHeaderHidden(True)
+        self.tree_widget.setIndentation(16)
+        self.tree_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree_widget.customContextMenuRequested.connect(self._on_tree_context_menu)
+        self.tree_widget.currentItemChanged.connect(self._on_tree_item_changed)
+        self.tree_widget.setDragDropMode(QTreeWidget.DragDropMode.InternalMove)
+        self.tree_widget.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.tree_widget.model().rowsMoved.connect(self._on_rows_moved)
+        left_layout.addWidget(self.tree_widget)
 
         # Bottom buttons
         left_btn_row = QHBoxLayout()
@@ -668,34 +772,210 @@ class MainWindow(QMainWindow):
     # --- Data loading ---
 
     def _load_list(self):
-        self.list_widget.clear()
+        self.tree_widget.clear()
         self._items = self.db.get_all_transcriptions()
+        folders = self.db.get_all_folders()
         search = self.search_edit.text().strip().lower() if hasattr(self, 'search_edit') else ""
+
+        # 폴더 트리 아이템 맵 생성
+        folder_map: dict[int, QTreeWidgetItem] = {}
+
+        def _get_folder_item(fid: int) -> QTreeWidgetItem:
+            if fid in folder_map:
+                return folder_map[fid]
+            folder = next((f for f in folders if f["id"] == fid), None)
+            if folder is None:
+                return None
+            parent_id = folder["parent_id"]
+            if parent_id and parent_id in [f["id"] for f in folders]:
+                parent_item = _get_folder_item(parent_id)
+                item = QTreeWidgetItem(parent_item)
+            else:
+                item = QTreeWidgetItem(self.tree_widget)
+            item.setText(0, folder["name"])
+            item.setData(0, Qt.ItemDataRole.UserRole, folder["id"])
+            item.setData(0, Qt.ItemDataRole.UserRole + 1, "folder")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsAutoTristate)
+            folder_map[fid] = item
+            return item
+
+        # 폴더 먼저 생성
+        for f in folders:
+            _get_folder_item(f["id"])
+
+        # 트랜스크립션 항목 추가
         for t in self._items:
-            if search and search not in t["filename"].lower():
+            display_name = t.get("display_name") or t["filename"]
+            if search and search not in display_name.lower():
                 continue
             dur = format_duration(t.get("duration"))
             date = t["created_at"][:10]
+            info_parts = [date, dur]
             model = t.get("model_name") or ""
             lang = t.get("language") or ""
-            info_parts = [date, dur]
             if model:
                 info_parts.append(model)
             if lang:
                 info_parts.append(lang)
-            item = QListWidgetItem(f"{t['filename']}\n{'  '.join(info_parts)}")
-            item.setData(Qt.ItemDataRole.UserRole, t["id"])
-            self.list_widget.addItem(item)
+
+            folder_id = t.get("folder_id")
+            parent = folder_map.get(folder_id) if folder_id else None
+            if parent:
+                item = QTreeWidgetItem(parent)
+            else:
+                item = QTreeWidgetItem(self.tree_widget)
+            item.setText(0, f"{display_name}\n{'  '.join(info_parts)}")
+            item.setData(0, Qt.ItemDataRole.UserRole, t["id"])
+            item.setData(0, Qt.ItemDataRole.UserRole + 1, "transcription")
+            # 트랜스크립션은 자식을 받지 않음 (드롭 대상 제외)
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsDropEnabled)
+
+        self.tree_widget.expandAll()
 
     def _on_search(self, _text: str):
         self._load_list()
 
-    def _on_select_item(self, row: int):
-        if row < 0 or row >= self.list_widget.count():
+    def _remove_live_item(self):
+        if self._live_item:
+            idx = self.tree_widget.indexOfTopLevelItem(self._live_item)
+            if idx >= 0:
+                self.tree_widget.takeTopLevelItem(idx)
+            self._live_item = None
+
+    # ── 컨텍스트 메뉴 ──
+
+    def _on_tree_context_menu(self, pos):
+        item = self.tree_widget.itemAt(pos)
+        menu = QMenu(self)
+
+        act_new_folder = menu.addAction("새 폴더")
+        act_new_folder.triggered.connect(lambda: self._ctx_new_folder(item))
+
+        if item is not None:
+            item_type = item.data(0, Qt.ItemDataRole.UserRole + 1)
+
+            if item_type in ("folder", "transcription"):
+                menu.addSeparator()
+                act_rename = menu.addAction("이름 변경")
+                act_rename.triggered.connect(lambda: self._ctx_rename(item))
+
+            if item_type == "transcription":
+                folders = self.db.get_all_folders()
+                if folders:
+                    move_menu = menu.addMenu("폴더로 이동")
+                    tid = item.data(0, Qt.ItemDataRole.UserRole)
+                    current_fid = None
+                    for t in self._items:
+                        if t["id"] == tid:
+                            current_fid = t.get("folder_id")
+                            break
+
+                    if current_fid is not None:
+                        act_root = move_menu.addAction("(최상위)")
+                        act_root.triggered.connect(lambda: self._ctx_move_to_folder(item, None))
+                        move_menu.addSeparator()
+
+                    for f in folders:
+                        if f["id"] == current_fid:
+                            continue
+                        act = move_menu.addAction(f["name"])
+                        fid = f["id"]
+                        act.triggered.connect(lambda checked=False, fid=fid: self._ctx_move_to_folder(item, fid))
+
+        menu.exec(self.tree_widget.viewport().mapToGlobal(pos))
+
+    def _ctx_new_folder(self, item):
+        parent_id = None
+        if item and item.data(0, Qt.ItemDataRole.UserRole + 1) == "folder":
+            parent_id = item.data(0, Qt.ItemDataRole.UserRole)
+
+        name, ok = QInputDialog.getText(self, "새 폴더", "폴더 이름:")
+        if ok and name.strip():
+            self.db.create_folder(name.strip(), parent_id)
+            self._load_list()
+
+    def _ctx_rename(self, item):
+        item_type = item.data(0, Qt.ItemDataRole.UserRole + 1)
+        item_id = item.data(0, Qt.ItemDataRole.UserRole)
+
+        if item_type == "folder":
+            current_name = item.text(0)
+            new_name, ok = QInputDialog.getText(self, "이름 변경", "새 이름:", text=current_name)
+            if ok and new_name.strip():
+                self.db.rename_folder(item_id, new_name.strip())
+                self._load_list()
+
+        elif item_type == "transcription":
+            data = self.db.get_transcription(item_id)
+            current_name = (data.get("display_name") or data["filename"]) if data else ""
+            new_name, ok = QInputDialog.getText(self, "이름 변경", "새 이름:", text=current_name)
+            if ok and new_name.strip():
+                self.db.rename_transcription(item_id, new_name.strip())
+                self._load_list()
+
+    def _ctx_move_to_folder(self, item, folder_id):
+        tid = item.data(0, Qt.ItemDataRole.UserRole)
+        self.db.move_transcription(tid, folder_id)
+        self._load_list()
+
+    def _on_rows_moved(self):
+        """드래그 앤 드롭 후 트리 상태를 DB에 반영한다."""
+        self._sync_tree_to_db()
+
+    def _sync_tree_to_db(self):
+        """현재 트리 위젯의 계층 구조를 DB에 반영한다."""
+        def _walk(parent_item, parent_folder_id):
+            count = parent_item.childCount() if parent_item else self.tree_widget.topLevelItemCount()
+            for i in range(count):
+                child = parent_item.child(i) if parent_item else self.tree_widget.topLevelItem(i)
+                item_type = child.data(0, Qt.ItemDataRole.UserRole + 1)
+                item_id = child.data(0, Qt.ItemDataRole.UserRole)
+
+                if item_type == "folder":
+                    self.db.move_folder(item_id, parent_folder_id)
+                    _walk(child, item_id)
+                elif item_type == "transcription":
+                    self.db.move_transcription(item_id, parent_folder_id)
+
+        _walk(None, None)
+
+    def _is_viewing_live(self) -> bool:
+        """현재 목록에서 '변환 중' 항목을 보고 있는지 확인."""
+        item = self.tree_widget.currentItem()
+        return item is not None and item is self._live_item
+
+    def _on_tree_item_changed(self, current, _previous):
+        """트리 항목 선택 변경 시 호출."""
+        if current is None:
             self._show_detail(False)
             return
 
-        tid = self.list_widget.item(row).data(Qt.ItemDataRole.UserRole)
+        # "변환 중" 항목 선택 → 라이브 데이터 복원
+        if current is self._live_item:
+            self._current_tid = None
+            self._show_detail(True)
+            self.btn_speakers.setVisible(False)
+            self.lbl_title.setText(self._live_filename)
+            self.lbl_info.setText("변환 진행 중...")
+            self.txt_timeline.setPlainText(self._live_timeline_text)
+            self.txt_fulltext.setPlainText(self._build_full_text(self._live_segments))
+            scrollbar = self.txt_timeline.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+            return
+
+        item_type = current.data(0, Qt.ItemDataRole.UserRole + 1)
+
+        # 폴더 선택 시 상세 숨김
+        if item_type == "folder":
+            self._current_tid = None
+            self._show_detail(False)
+            return
+
+        tid = current.data(0, Qt.ItemDataRole.UserRole)
+        if tid is None:
+            self._show_detail(False)
+            return
+
         data = self.db.get_transcription(tid)
         if data is None:
             self._show_detail(False)
@@ -703,12 +983,12 @@ class MainWindow(QMainWindow):
 
         self._current_tid = tid
         self._show_detail(True)
-        self.lbl_title.setText(data["filename"])
+        display_name = data.get("display_name") or data["filename"]
+        self.lbl_title.setText(display_name)
         dur = format_duration(data.get("duration"))
         date = data["created_at"][:10]
         self.lbl_info.setText(f"날짜: {date}    길이: {dur}")
 
-        # Timeline with speakers
         lines = []
         for seg in data.get("segments", []):
             ts_start = format_timestamp(seg["start"])
@@ -719,11 +999,8 @@ class MainWindow(QMainWindow):
             else:
                 lines.append(f"[{ts_start} ~ {ts_end}]  {seg['text']}")
         self.txt_timeline.setPlainText("\n".join(lines))
-
-        # Full text with speaker grouping
         self.txt_fulltext.setPlainText(self._build_full_text(data.get("segments", [])))
 
-        # 화자 관리 버튼: 화자 정보가 있을 때만 표시
         has_speakers = any(s.get("speaker") for s in data.get("segments", []))
         self.btn_speakers.setVisible(has_speakers)
 
@@ -776,12 +1053,24 @@ class MainWindow(QMainWindow):
         self.lbl_status.setVisible(True)
         self.lbl_status.setText("준비 중...")
 
+        # 라이브 상태 초기화
+        self._live_filename = os.path.basename(video_path)
+        self._live_segments = []
+        self._live_timeline_text = ""
+
+        # 목록 맨 위에 "변환 중" 항목 삽입
+        self._live_item = QTreeWidgetItem()
+        self._live_item.setText(0, f"[ 변환 중 ] {self._live_filename}")
+        self._live_item.setData(0, Qt.ItemDataRole.UserRole, None)
+        self._live_item.setData(0, Qt.ItemDataRole.UserRole + 1, "live")
+        self.tree_widget.insertTopLevelItem(0, self._live_item)
+        self.tree_widget.setCurrentItem(self._live_item)
+
         self._show_detail(True)
-        self.lbl_title.setText(os.path.basename(video_path))
+        self.lbl_title.setText(self._live_filename)
         self.lbl_info.setText("변환 진행 중...")
         self.txt_timeline.clear()
         self.txt_fulltext.clear()
-        self._live_segments = []
 
         self._thread = QThread()
         self._worker = TranscriberWorker(
@@ -819,12 +1108,19 @@ class MainWindow(QMainWindow):
             line = f"[{ts_start} ~ {ts_end}]  [{speaker}]  {seg['text']}"
         else:
             line = f"[{ts_start} ~ {ts_end}]  {seg['text']}"
-        self.txt_timeline.appendPlainText(line)
-        # Auto-scroll to bottom
-        scrollbar = self.txt_timeline.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
-        # Update full text tab live
-        self.txt_fulltext.setPlainText(self._build_full_text(self._live_segments))
+
+        # 타임라인 텍스트 누적 (다른 항목 보다가 돌아올 때 복원용)
+        if self._live_timeline_text:
+            self._live_timeline_text += "\n" + line
+        else:
+            self._live_timeline_text = line
+
+        # "변환 중" 항목을 보고 있을 때만 UI 직접 업데이트
+        if self._is_viewing_live():
+            self.txt_timeline.appendPlainText(line)
+            scrollbar = self.txt_timeline.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+            self.txt_fulltext.setPlainText(self._build_full_text(self._live_segments))
 
     def _on_finished(self, result: dict):
         tid = self.db.add_transcription(
@@ -838,7 +1134,16 @@ class MainWindow(QMainWindow):
         )
         self._current_tid = tid
 
-        # Update display with final mapped labels
+        # "변환 중" 항목 제거
+        was_viewing_live = self._is_viewing_live()
+        self._remove_live_item()
+
+        # 목록 새로고침
+        self._load_list()
+
+        # 최종 결과 표시 (라이브 뷰를 보고 있었거나, 완료 시 항상 결과 표시)
+        self._show_detail(True)
+        self.lbl_title.setText(result["filename"])
         dur = format_duration(result.get("duration"))
         self.lbl_info.setText(f"길이: {dur}")
 
@@ -854,14 +1159,8 @@ class MainWindow(QMainWindow):
         self.txt_timeline.setPlainText("\n".join(lines))
         self.txt_fulltext.setPlainText(self._build_full_text(result["segments"]))
 
-        # 화자 정보 있으면 버튼 표시
         has_speakers = any(s.get("speaker") for s in result.get("segments", []))
         self.btn_speakers.setVisible(has_speakers)
-
-        self._load_list()
-        self.list_widget.blockSignals(True)
-        self.list_widget.setCurrentRow(0)
-        self.list_widget.blockSignals(False)
 
         self.btn_add.setEnabled(True)
         self.progress_bar.setVisible(False)
@@ -873,6 +1172,9 @@ class MainWindow(QMainWindow):
         )
 
     def _on_error(self, message: str):
+        # "변환 중" 항목 제거
+        self._remove_live_item()
+
         self.btn_add.setEnabled(True)
         self.progress_bar.setVisible(False)
         self.lbl_status.setVisible(False)
@@ -925,13 +1227,13 @@ class MainWindow(QMainWindow):
                     self.db.update_speaker_name(self._current_tid, temp_name, new_name)
 
             # Refresh display
-            self._on_select_item(self.list_widget.currentRow())
+            self._on_tree_item_changed(self.tree_widget.currentItem(), None)
 
     def _on_retranscribe(self):
-        row = self.list_widget.currentRow()
-        if row < 0:
+        item = self.tree_widget.currentItem()
+        if item is None or item.data(0, Qt.ItemDataRole.UserRole + 1) != "transcription":
             return
-        tid = self.list_widget.item(row).data(Qt.ItemDataRole.UserRole)
+        tid = item.data(0, Qt.ItemDataRole.UserRole)
         data = self.db.get_transcription(tid)
         if not data:
             return
@@ -942,23 +1244,34 @@ class MainWindow(QMainWindow):
         self._add_file(filepath)
 
     def _on_delete(self):
-        row = self.list_widget.currentRow()
-        if row < 0:
+        item = self.tree_widget.currentItem()
+        if item is None:
             return
+        item_type = item.data(0, Qt.ItemDataRole.UserRole + 1)
+        item_id = item.data(0, Qt.ItemDataRole.UserRole)
 
-        tid = self.list_widget.item(row).data(Qt.ItemDataRole.UserRole)
-        data = self.db.get_transcription(tid)
-        name = data["filename"] if data else "?"
-        reply = QMessageBox.question(
-            self,
-            "삭제 확인",
-            f"'{name}' 트랜스크립션을 삭제하시겠습니까?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            self.db.delete_transcription(tid)
-            self._load_list()
-            self._show_detail(False)
+        if item_type == "folder":
+            reply = QMessageBox.question(
+                self, "삭제 확인",
+                f"'{item.text(0)}' 폴더를 삭제하시겠습니까?\n(내부 항목은 상위로 이동됩니다)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.db.delete_folder(item_id)
+                self._load_list()
+                self._show_detail(False)
+        elif item_type == "transcription":
+            data = self.db.get_transcription(item_id)
+            name = (data.get("display_name") or data["filename"]) if data else "?"
+            reply = QMessageBox.question(
+                self, "삭제 확인",
+                f"'{name}' 트랜스크립션을 삭제하시겠습니까?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.db.delete_transcription(item_id)
+                self._load_list()
+                self._show_detail(False)
 
     def _on_export(self):
         if self._current_tid is None:

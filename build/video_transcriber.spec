@@ -318,6 +318,7 @@ a = Analysis(
     datas=[
         (os.path.join(whisper_dir, 'assets'), 'whisper/assets'),
         (os.path.abspath('../assets/icon'), 'assets/icon'),
+        (os.path.join(os.path.expanduser('~'), '.cache', 'whisper', 'large-v3.pt'), 'whisper_models'),
     ] + extra_datas,
     hiddenimports=[
         'whisper',

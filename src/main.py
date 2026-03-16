@@ -1,5 +1,9 @@
 import os
 import sys
+import warnings
+
+warnings.filterwarnings("ignore", message="std\\(\\): degrees of freedom")
+warnings.filterwarnings("ignore", category=UserWarning, module="pyannote")
 
 # 의존성 호환성 패치 — pyannote import 전에 실행 필수
 from src.torchaudio_compat import apply_all_patches
@@ -9,9 +13,10 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QIcon, QPalette
 from PySide6.QtWidgets import QApplication
 
-from src.config import get_theme
+from src.config import get_theme, get_db_dir, get_hf_cache
 from src.database import Database
 from src.main_window import MainWindow
+from src.model_utils import ensure_bundled_model
 
 
 def get_icon_path() -> str:
@@ -23,10 +28,16 @@ def get_icon_path() -> str:
 
 
 def get_db_path() -> str:
-    app_data = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
-    db_dir = os.path.join(app_data, "VideoTranscriber")
+    db_dir = get_db_dir()
     os.makedirs(db_dir, exist_ok=True)
     return os.path.join(db_dir, "transcriptions.db")
+
+
+def apply_custom_paths() -> None:
+    """사용자 지정 경로를 환경변수에 반영한다 (HuggingFace 캐시)."""
+    hf_cache = get_hf_cache()
+    os.environ.setdefault("HF_HOME", hf_cache)
+    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", os.path.join(hf_cache, "hub"))
 
 
 def apply_dark_palette(app: QApplication):
@@ -188,6 +199,9 @@ def main():
 
     if get_theme() == "dark":
         apply_dark_palette(app)
+
+    apply_custom_paths()
+    ensure_bundled_model()
 
     db = Database(get_db_path())
     window = MainWindow(db)

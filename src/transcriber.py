@@ -28,9 +28,10 @@ def extract_audio(video_path: str, audio_path: str, ffmpeg_path: str) -> None:
         "-ac", "1",
         audio_path,
     ]
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    r = subprocess.run(cmd, capture_output=True)
     if r.returncode != 0:
-        raise RuntimeError(f"ffmpeg 오류: {r.stderr[-500:]}")
+        stderr = r.stderr.decode("utf-8", errors="replace")
+        raise RuntimeError(f"ffmpeg 오류: {stderr[-500:]}")
 
 
 def load_wav_as_numpy(audio_path: str) -> np.ndarray:
@@ -110,11 +111,18 @@ class TranscriberWorker(QObject):
             if use_diar:
                 self.progress.emit(8, f"[3/{step_total}] 화자 분석 중...")
                 from src.diarizer import run_diarization
+
+                # diarizer의 0~100을 전체 진행률 8~18에 매핑
+                def _diar_progress(pct: int, msg: str):
+                    mapped = 8 + int(pct * 0.10)  # 8% ~ 18%
+                    self.progress.emit(mapped, f"[3/{step_total}] {msg}")
+
                 diarization_segments = run_diarization(
                     tmp_wav, self.hf_token,
                     num_speakers=self.num_speakers,
                     min_speakers=self.min_speakers,
                     max_speakers=self.max_speakers,
+                    progress_callback=_diar_progress,
                 )
                 self.progress.emit(18, "화자 분석 완료")
                 if self._cancelled:
@@ -124,7 +132,8 @@ class TranscriberWorker(QObject):
             model_pct = 18 if use_diar else 15
             model_step = 4 if use_diar else 3
             self.progress.emit(model_pct, f"[{model_step}/{step_total}] Whisper 모델 로드 중...")
-            model = whisper.load_model(self.model_name)
+            from src.model_utils import get_whisper_cache_dir
+            model = whisper.load_model(self.model_name, download_root=get_whisper_cache_dir())
             if self._cancelled:
                 return
 
