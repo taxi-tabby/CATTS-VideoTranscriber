@@ -1,6 +1,6 @@
 # CATTS - Video Transcriber
 
-Free, open-source media transcription tool powered by [OpenAI Whisper](https://github.com/openai/whisper) and [pyannote.audio](https://github.com/pyannote/pyannote-audio). Runs entirely offline on your local machine.
+Free, open-source media transcription tool powered by [OpenAI Whisper](https://github.com/openai/whisper) and [pyannote.audio](https://github.com/pyannote/pyannote-audio). Runs entirely half-offline on your local machine.
 
 > Korean UI only. English UI is planned for a future release.
 >
