@@ -8,6 +8,13 @@ Free, open-source media transcription tool powered by [OpenAI Whisper](https://g
 
 ---
 
+## Downloads
+
+
+[CATTS-VideoTranscriber/releases]([https://huggingface.co/settings/tokens](https://github.com/taxi-tabby/CATTS-VideoTranscriber/releases))
+
+---
+
 ## Features
 
 - **Speech-to-Text** -- Transcribe video and audio files using OpenAI Whisper (tiny through large-v3)
