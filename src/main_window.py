@@ -76,39 +76,37 @@ class StartupGuideDialog(QDialog):
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
-        title = QLabel("CATTS 사용 안내")
+        title = QLabel("CATTS - Audio/Video to Text")
         title.setFont(QFont("", 13, QFont.Weight.Bold))
         layout.addWidget(title)
 
-        layout.addSpacing(8)
+        tabs = QTabWidget()
 
-        info = QLabel(
-            "이 프로그램은 영상/음성 파일에서 텍스트를 추출합니다.\n"
-            "아래 환경이 필요합니다.\n"
-        )
+        # ── 시작 안내 탭 ──
+        setup_tab = QWidget()
+        setup_layout = QVBoxLayout(setup_tab)
+
+        info = QLabel("이 프로그램은 영상/음성 파일에서 텍스트를 추출합니다.")
         info.setWordWrap(True)
-        layout.addWidget(info)
+        setup_layout.addWidget(info)
 
-        # 필수 환경
         grp_required = QGroupBox("필수")
         req_layout = QVBoxLayout(grp_required)
         req_layout.addWidget(QLabel(
-            "- 기본 모델(large-v3, 1.5GB)이 프로그램에 포함되어 있습니다\n"
+            "- 기본 모델(large-v3, 약 2.9GB)이 프로그램에 포함되어 있습니다\n"
             "- 다른 모델을 사용하려면 인터넷 연결이 필요합니다 (자동 다운로드)\n"
             "- 다운로드된 모델은 저장되므로 이후에는 오프라인으로 사용 가능합니다"
         ))
-        layout.addWidget(grp_required)
+        setup_layout.addWidget(grp_required)
 
-        # 권장 환경
         grp_recommended = QGroupBox("권장")
         rec_layout = QVBoxLayout(grp_recommended)
         rec_layout.addWidget(QLabel(
             "- NVIDIA GPU (CUDA): 변환 속도가 크게 향상됩니다\n"
             "  (GPU 없이도 CPU로 동작하지만 느릴 수 있습니다)"
         ))
-        layout.addWidget(grp_recommended)
+        setup_layout.addWidget(grp_recommended)
 
-        # 화자 분리 기능
         grp_diar = QGroupBox("화자 분리 기능 사용 시 (선택)")
         diar_layout = QVBoxLayout(grp_diar)
         diar_layout.addWidget(QLabel(
@@ -117,9 +115,52 @@ class StartupGuideDialog(QDialog):
             "- pyannote 모델 라이선스 동의 (무료, 모델 페이지에서 Agree 클릭)\n"
             "- 설정 버튼에서 토큰 등록 및 상세 안내를 확인할 수 있습니다"
         ))
-        layout.addWidget(grp_diar)
+        setup_layout.addWidget(grp_diar)
+        setup_layout.addStretch()
+        tabs.addTab(setup_tab, "시작 안내")
 
-        layout.addSpacing(8)
+        # ── 알아두기 탭 ──
+        tips_tab = QWidget()
+        tips_layout = QVBoxLayout(tips_tab)
+
+        grp_perf = QGroupBox("인식 성능에 대하여")
+        perf_layout = QVBoxLayout(grp_perf)
+        lbl_perf = QLabel(
+            "이 프로그램은 OpenAI Whisper 음성인식 모델을 사용합니다.\n\n"
+            "높은 정확도를 보이는 경우:\n"
+            "  - 회의, 강의, 인터뷰 등 사람 목소리 위주의 녹음\n"
+            "  - 배경 소음이 적고 마이크 품질이 좋은 환경\n"
+            "  - 한 명 또는 소수가 번갈아 말하는 대화\n\n"
+            "정확도가 낮아질 수 있는 경우:\n"
+            "  - 배경 음악이 크거나 노래가 포함된 영상\n"
+            "  - 여러 사람이 동시에 말하는 상황\n"
+            "  - 심한 소음, 울림, 저음질 녹음\n"
+            "  - 속삭임이나 매우 빠른 말투"
+        )
+        lbl_perf.setWordWrap(True)
+        perf_layout.addWidget(lbl_perf)
+        tips_layout.addWidget(grp_perf)
+
+        grp_speed = QGroupBox("변환 속도에 대하여")
+        speed_layout = QVBoxLayout(grp_speed)
+        lbl_speed = QLabel(
+            "모든 변환은 클라우드가 아닌 사용자의 PC에서 직접 수행됩니다.\n"
+            "따라서 PC 사양에 따라 변환 시간이 달라집니다.\n\n"
+            "  - NVIDIA GPU가 있으면 실시간보다 빠르게 처리됩니다\n"
+            "  - GPU 없이 CPU만 사용할 경우 영상 길이의 수 배가 걸릴 수 있습니다\n"
+            "  - 큰 모델(large-v3)일수록 정확하지만 더 오래 걸립니다\n"
+            "  - 빠른 처리가 필요하면 tiny, base 등 작은 모델을 사용해보세요\n\n"
+            "변환 중에도 프로그램을 계속 사용할 수 있으며,\n"
+            "다른 트랜스크립션을 살펴보다가 변환 중 항목으로 돌아올 수 있습니다."
+        )
+        lbl_speed.setWordWrap(True)
+        speed_layout.addWidget(lbl_speed)
+        tips_layout.addWidget(grp_speed)
+
+        tips_layout.addStretch()
+        tabs.addTab(tips_tab, "알아두기")
+
+        layout.addWidget(tabs)
 
         # 다시 보지 않기 체크박스 + 확인 버튼
         bottom = QHBoxLayout()
@@ -196,6 +237,11 @@ class SettingsDialog(QDialog):
         theme_layout.addWidget(self.combo_theme)
         theme_layout.addStretch()
         general_layout.addWidget(grp_theme)
+
+        # 시작 안내 다시 보기
+        btn_show_guide = QPushButton("시작 안내 다시 보기")
+        btn_show_guide.clicked.connect(self._on_show_guide)
+        general_layout.addWidget(btn_show_guide)
 
         general_layout.addStretch()
         tabs.addTab(general_tab, "일반")
@@ -379,6 +425,9 @@ class SettingsDialog(QDialog):
         self.edit_token.clear()
         self.lbl_verify_result.setText("토큰이 삭제되었습니다.")
         self.lbl_verify_result.setStyleSheet("color: gray;")
+
+    def _on_show_guide(self):
+        StartupGuideDialog(self).exec()
 
     def _browse_dir(self, line_edit: QLineEdit):
         current = line_edit.text()
