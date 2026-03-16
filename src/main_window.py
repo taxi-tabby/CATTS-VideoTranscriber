@@ -124,7 +124,7 @@ class MainWindow(QMainWindow):
         # Empty state
         self.lbl_empty = QLabel("영상을 추가하면 여기에 결과가 표시됩니다.")
         self.lbl_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_empty.setStyleSheet("color: #888; font-size: 14px;")
+        self.lbl_empty.setStyleSheet("color: #8EA4C0; font-size: 14px;")
         right_layout.addWidget(self.lbl_empty)
 
         splitter.addWidget(right)
