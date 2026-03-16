@@ -317,6 +317,7 @@ a = Analysis(
     ] + extra_binaries,
     datas=[
         (os.path.join(whisper_dir, 'assets'), 'whisper/assets'),
+        (os.path.abspath('../assets/icon'), 'assets/icon'),
     ] + extra_datas,
     hiddenimports=[
         'whisper',
@@ -371,7 +372,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
-    icon=None,
+    icon=os.path.abspath('../assets/icon/app.ico'),
 )
 
 coll = COLLECT(

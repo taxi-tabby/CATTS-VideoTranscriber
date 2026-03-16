@@ -521,7 +521,7 @@ class MainWindow(QMainWindow):
         self._thread = None
         self._current_tid = None
 
-        self.setWindowTitle("Video Transcriber")
+        self.setWindowTitle("CATTS - Video Transcriber")
         self.setMinimumSize(900, 600)
         self.resize(1100, 700)
         self.setAcceptDrops(True)
@@ -632,7 +632,7 @@ class MainWindow(QMainWindow):
         # Empty state
         self.lbl_empty = QLabel("영상 또는 음성 파일을 추가하면 여기에 결과가 표시됩니다.")
         self.lbl_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_empty.setStyleSheet("color: #888; font-size: 14px;")
+        self.lbl_empty.setStyleSheet("color: #8EA4C0; font-size: 14px;")
         right_layout.addWidget(self.lbl_empty)
 
         splitter.addWidget(right)
