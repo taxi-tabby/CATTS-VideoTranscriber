@@ -1,10 +1,19 @@
 import os
 import sys
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from src.database import Database
 from src.main_window import MainWindow
+
+
+def get_icon_path() -> str:
+    if getattr(sys, "frozen", False):
+        base = sys._MEIPASS
+    else:
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, "assets", "icon", "app.ico")
 
 
 def get_db_path() -> str:
@@ -18,6 +27,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Video Transcriber")
     app.setStyle("Fusion")
+    app.setWindowIcon(QIcon(get_icon_path()))
 
     db = Database(get_db_path())
     window = MainWindow(db)

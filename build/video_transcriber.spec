@@ -13,7 +13,10 @@ a = Analysis(
     ['../src/main.py'],
     pathex=[os.path.abspath('..')],
     binaries=[(ffmpeg_exe, 'imageio_ffmpeg/binaries')],
-    datas=[(os.path.join(whisper_dir, 'assets'), 'whisper/assets')],
+    datas=[
+        (os.path.join(whisper_dir, 'assets'), 'whisper/assets'),
+        (os.path.abspath('../assets/icon'), 'assets/icon'),
+    ],
     hiddenimports=[
         'whisper',
         'PySide6',
@@ -43,7 +46,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=True,
-    icon=None,
+    icon=os.path.abspath('../assets/icon/app.ico'),
 )
 
 coll = COLLECT(
