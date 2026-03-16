@@ -25,7 +25,7 @@ def get_db_path() -> str:
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("Video Transcriber")
+    app.setApplicationName("CATTS - Video Transcriber")
     app.setStyle("Fusion")
     app.setWindowIcon(QIcon(get_icon_path()))
 

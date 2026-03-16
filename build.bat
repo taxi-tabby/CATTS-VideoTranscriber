@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul 2>&1
-echo === Video Transcriber Build ===
+echo === CATTS - Video Transcriber Build ===
 echo.
 
 cd /d "%~dp0"
@@ -39,6 +39,6 @@ if errorlevel 1 (
 echo.
 echo Build complete!
 echo exe: build\output\dist\VideoTranscriber\VideoTranscriber.exe
-echo installer: build\output\installer\VideoTranscriber_Setup_1.0.0.exe
+echo installer: build\output\installer\CATTS_Setup_1.0.0.exe
 echo.
 pause

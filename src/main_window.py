@@ -45,7 +45,7 @@ class MainWindow(QMainWindow):
         self._worker = None
         self._thread = None
 
-        self.setWindowTitle("Video Transcriber")
+        self.setWindowTitle("CATTS - Video Transcriber")
         self.setMinimumSize(900, 600)
         self.resize(1100, 700)
 
