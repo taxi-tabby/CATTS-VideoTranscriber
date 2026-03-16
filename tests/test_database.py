@@ -56,3 +56,46 @@ class TestDatabase:
         db.delete_transcription(tid)
         result = db.get_transcription(tid)
         assert result is None
+
+    def test_segment_with_speaker(self, db):
+        tid = db.add_transcription(
+            "test.mp4", "C:/test.mp4", 60.0, "텍스트",
+            [{"start": 0.0, "end": 5.0, "text": "세그먼트", "speaker": "화자 1"}],
+        )
+        result = db.get_transcription(tid)
+        assert result["segments"][0]["speaker"] == "화자 1"
+
+    def test_segment_without_speaker(self, db):
+        tid = db.add_transcription(
+            "test.mp4", "C:/test.mp4", 60.0, "텍스트",
+            [{"start": 0.0, "end": 5.0, "text": "세그먼트"}],
+        )
+        result = db.get_transcription(tid)
+        assert result["segments"][0]["speaker"] is None
+
+    def test_get_speakers(self, db):
+        tid = db.add_transcription(
+            "test.mp4", "C:/test.mp4", 60.0, "텍스트",
+            [
+                {"start": 0.0, "end": 5.0, "text": "a", "speaker": "화자 1"},
+                {"start": 5.0, "end": 10.0, "text": "b", "speaker": "화자 2"},
+                {"start": 10.0, "end": 15.0, "text": "c", "speaker": "화자 1"},
+            ],
+        )
+        speakers = db.get_speakers(tid)
+        assert set(speakers) == {"화자 1", "화자 2"}
+
+    def test_update_speaker_name(self, db):
+        tid = db.add_transcription(
+            "test.mp4", "C:/test.mp4", 60.0, "텍스트",
+            [
+                {"start": 0.0, "end": 5.0, "text": "a", "speaker": "화자 1"},
+                {"start": 5.0, "end": 10.0, "text": "b", "speaker": "화자 2"},
+                {"start": 10.0, "end": 15.0, "text": "c", "speaker": "화자 1"},
+            ],
+        )
+        db.update_speaker_name(tid, "화자 1", "김대리")
+        result = db.get_transcription(tid)
+        assert result["segments"][0]["speaker"] == "김대리"
+        assert result["segments"][1]["speaker"] == "화자 2"
+        assert result["segments"][2]["speaker"] == "김대리"
