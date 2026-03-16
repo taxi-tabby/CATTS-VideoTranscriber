@@ -99,10 +99,17 @@ class TranscriberWorker(QObject):
             if self._cancelled:
                 return
 
-            # Step 2: Load audio
-            self.progress.emit(8 if use_diar else 10, f"[2/{step_total}] 오디오 로드 중...")
+            # Step 2: Load audio + preprocess
+            self.progress.emit(8 if use_diar else 10, f"[2/{step_total}] 오디오 로드 및 전처리 중...")
             audio = load_wav_as_numpy(tmp_wav)
-            duration = get_video_duration(audio)
+            duration = get_video_duration(audio)  # 원본 영상 길이 (결과용)
+            if self._cancelled:
+                return
+
+            from src.audio_preprocess import preprocess as preprocess_audio
+            audio, trim_offset_samples = preprocess_audio(audio)
+            trim_offset_sec = trim_offset_samples / SAMPLE_RATE
+            audio_duration = get_video_duration(audio)  # 트리밍 후 길이 (진행률용)
             if self._cancelled:
                 return
 
@@ -153,20 +160,20 @@ class TranscriberWorker(QObject):
                 chunk = audio[chunk_start:chunk_end]
 
                 time_offset = chunk_start / SAMPLE_RATE
-                processed_sec = min(chunk_end / SAMPLE_RATE, duration)
+                processed_sec = min(chunk_end / SAMPLE_RATE, audio_duration)
 
-                pct = transcribe_start + int((processed_sec / duration) * (95 - transcribe_start))
+                pct = transcribe_start + int((processed_sec / audio_duration) * (95 - transcribe_start))
                 pct = min(pct, 95)
 
                 elapsed = time.time() - start_time
                 transcribe_step = step_total
                 if processed_sec > 0 and elapsed > 1:
-                    eta = elapsed * (duration - processed_sec) / processed_sec
+                    eta = elapsed * (audio_duration - processed_sec) / processed_sec
                     eta_min, eta_sec = divmod(int(eta), 60)
                     eta_str = f" (남은 시간: {eta_min}분 {eta_sec}초)" if eta_min > 0 else f" (남은 시간: {eta_sec}초)"
                 else:
                     eta_str = ""
-                self.progress.emit(pct, f"[{transcribe_step}/{step_total}] 변환 중... {processed_sec:.0f}s / {duration:.0f}s{eta_str}")
+                self.progress.emit(pct, f"[{transcribe_step}/{step_total}] 변환 중... {processed_sec:.0f}s / {audio_duration:.0f}s{eta_str}")
 
                 prompt = prev_text[-200:] if prev_text else None
                 if prompt:
@@ -185,8 +192,8 @@ class TranscriberWorker(QObject):
                 chunk_seg_start = len(all_segments)
                 for seg in result.get("segments", []):
                     adjusted = {
-                        "start": seg["start"] + time_offset,
-                        "end": seg["end"] + time_offset,
+                        "start": seg["start"] + time_offset + trim_offset_sec,
+                        "end": seg["end"] + time_offset + trim_offset_sec,
                         "text": seg["text"].strip(),
                     }
                     if adjusted["text"]:
