@@ -1,8 +1,10 @@
 import os
+import sys
+import time
 import webbrowser
 
 from PySide6.QtCore import Qt, QThread, QTimer, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QFont
+from PySide6.QtGui import QAction, QDesktopServices, QFont, QIcon, QShortcut, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -13,19 +15,22 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
-    # QListWidget / QListWidgetItem removed — using QTreeWidget
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QSpinBox,
     QSplitter,
+    QSystemTrayIcon,
     QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -438,7 +443,6 @@ class SettingsDialog(QDialog):
     def _on_save(self):
         set_whisper_model(self.combo_model.currentData())
         new_theme = self.combo_theme.currentData()
-        old_theme = get_theme()
         set_theme(new_theme)
         token = self.edit_token.text().strip()
         if token:
@@ -460,8 +464,8 @@ class SettingsDialog(QDialog):
             set_hf_cache(new_hf)
             need_restart = True
 
-        if need_restart or new_theme != old_theme:
-            QMessageBox.information(self, "재시작 필요", "변경된 설정은 프로그램을 다시 시작하면 적용됩니다.")
+        if need_restart:
+            QMessageBox.information(self, "재시작 필요", "경로 변경은 프로그램을 다시 시작하면 적용됩니다.")
         self.accept()
 
 
@@ -665,7 +669,13 @@ class MainWindow(QMainWindow):
         self._live_item = None          # 변환 중 목록 항목 (QTreeWidgetItem)
         self._live_filename = ""        # 변환 중 파일명
         self._live_segments = []        # 변환 중 세그먼트 누적
-        self._live_timeline_text = ""   # 변환 중 타임라인 텍스트
+        self._last_progress_msg = ""    # 마지막 진행 메시지 (경과 시간 표시용)
+        self._elapsed_timer = QTimer()  # 경과 시간 갱신 타이머
+        self._elapsed_timer.setInterval(1000)
+        self._elapsed_timer.timeout.connect(self._update_elapsed)
+        self._process_start_time = None
+        self._editing = False           # 편집 모드 상태
+        self._queue = []                # 변환 대기열: [(path, settings, hf_token), ...]
 
         self.setWindowTitle("CATTS - Video Transcriber")
         self.setMinimumSize(900, 600)
@@ -673,6 +683,8 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         self._build_ui()
+        self._setup_tray_icon()
+        self._setup_shortcuts()
         self._load_list()
 
         if get_show_startup_guide():
@@ -680,6 +692,37 @@ class MainWindow(QMainWindow):
 
     def _show_startup_guide(self):
         StartupGuideDialog(self).exec()
+
+    # ── 시스템 트레이 아이콘 (Feature 7) ──
+
+    def _setup_tray_icon(self):
+        self._tray_icon = QSystemTrayIcon(self)
+        app_icon = QApplication.instance().windowIcon()
+        if not app_icon.isNull():
+            self._tray_icon.setIcon(app_icon)
+        self._tray_icon.setToolTip("CATTS - Video Transcriber")
+        self._tray_icon.show()
+
+    def _notify(self, title: str, message: str):
+        """OS 토스트 알림을 표시한다."""
+        if self._tray_icon.isSystemTrayAvailable():
+            self._tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 5000)
+
+    # ── 키보드 단축키 ──
+
+    def _setup_shortcuts(self):
+        QShortcut(QKeySequence("Ctrl+O"), self, self._on_add_video)
+        QShortcut(QKeySequence("Ctrl+S"), self, self._on_export)
+        QShortcut(QKeySequence("Ctrl+C"), self, self._on_copy)
+        QShortcut(QKeySequence("Delete"), self, self._on_delete)
+        QShortcut(QKeySequence("Ctrl+F"), self, self._focus_timeline_search)
+
+    def _focus_timeline_search(self):
+        self.tabs.setCurrentIndex(0)
+        self.timeline_search.setFocus()
+        self.timeline_search.selectAll()
+
+    # ── UI 빌드 ──
 
     def _build_ui(self):
         central = QWidget()
@@ -750,20 +793,85 @@ class MainWindow(QMainWindow):
         self.lbl_info = QLabel("")
         right_layout.addWidget(self.lbl_info)
 
-        # Tabs: timeline / full text
+        # Tabs: timeline / full text / processing log
         self.tabs = QTabWidget()
 
-        # Timeline tab
-        self.txt_timeline = QPlainTextEdit()
-        self.txt_timeline.setReadOnly(True)
-        self.txt_timeline.setFont(QFont("Consolas", 10))
-        self.tabs.addTab(self.txt_timeline, "타임라인")
+        # ── Timeline tab (Feature 10: QTableWidget) ──
+        timeline_container = QWidget()
+        tl_layout = QVBoxLayout(timeline_container)
+        tl_layout.setContentsMargins(0, 4, 0, 0)
 
-        # Full text tab
+        # Search + Speaker filter (Feature 1)
+        filter_row = QHBoxLayout()
+        self.timeline_search = QLineEdit()
+        self.timeline_search.setPlaceholderText("텍스트 검색...")
+        self.timeline_search.setClearButtonEnabled(True)
+        self.timeline_search.textChanged.connect(self._on_timeline_filter)
+        filter_row.addWidget(self.timeline_search, stretch=1)
+
+        self.speaker_filter = QComboBox()
+        self.speaker_filter.addItem("전체 화자", "")
+        self.speaker_filter.setMinimumWidth(120)
+        self.speaker_filter.currentIndexChanged.connect(self._on_timeline_filter)
+        self.speaker_filter.setVisible(False)
+        filter_row.addWidget(self.speaker_filter)
+
+        tl_layout.addLayout(filter_row)
+
+        self.table_timeline = QTableWidget()
+        self.table_timeline.setColumnCount(4)
+        self.table_timeline.setHorizontalHeaderLabels(["시작", "종료", "화자", "텍스트"])
+        self.table_timeline.verticalHeader().setVisible(False)
+        self.table_timeline.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table_timeline.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table_timeline.setWordWrap(True)
+        header = self.table_timeline.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+
+        tl_layout.addWidget(self.table_timeline)
+        self.tabs.addTab(timeline_container, "타임라인")
+
+        # ── Full text tab (Feature 5: editable) ──
+        fulltext_container = QWidget()
+        ft_layout = QVBoxLayout(fulltext_container)
+        ft_layout.setContentsMargins(0, 4, 0, 0)
+
         self.txt_fulltext = QPlainTextEdit()
         self.txt_fulltext.setReadOnly(True)
         self.txt_fulltext.setFont(QFont("Malgun Gothic", 10))
-        self.tabs.addTab(self.txt_fulltext, "전체 텍스트")
+        ft_layout.addWidget(self.txt_fulltext)
+
+        # Edit buttons
+        edit_row = QHBoxLayout()
+        edit_row.addStretch()
+        self.btn_edit = QPushButton("편집")
+        self.btn_edit.clicked.connect(self._on_toggle_edit)
+        self.btn_edit.setVisible(False)
+        edit_row.addWidget(self.btn_edit)
+
+        self.btn_save_edit = QPushButton("저장")
+        self.btn_save_edit.clicked.connect(self._on_save_edit)
+        self.btn_save_edit.setVisible(False)
+        self.btn_save_edit.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; }")
+        edit_row.addWidget(self.btn_save_edit)
+
+        self.btn_cancel_edit = QPushButton("편집 취소")
+        self.btn_cancel_edit.clicked.connect(self._on_cancel_edit)
+        self.btn_cancel_edit.setVisible(False)
+        edit_row.addWidget(self.btn_cancel_edit)
+
+        ft_layout.addLayout(edit_row)
+        self.tabs.addTab(fulltext_container, "전체 텍스트")
+
+        # ── Processing log tab ──
+        self.txt_log = QPlainTextEdit()
+        self.txt_log.setReadOnly(True)
+        self.txt_log.setFont(QFont("Consolas", 9))
+        self.txt_log.setStyleSheet("QPlainTextEdit { background-color: #1e1e2e; color: #cdd6f4; }")
+        self.tabs.addTab(self.txt_log, "처리 로그")
 
         right_layout.addWidget(self.tabs, stretch=1)
 
@@ -791,7 +899,7 @@ class MainWindow(QMainWindow):
         splitter.addWidget(right)
         splitter.setSizes([280, 720])
 
-        # --- Bottom progress bar ---
+        # --- Bottom progress bar + cancel button (Feature 3) ---
         bottom = QWidget()
         bottom_layout = QHBoxLayout(bottom)
         bottom_layout.setContentsMargins(8, 4, 8, 8)
@@ -800,6 +908,13 @@ class MainWindow(QMainWindow):
         self.progress_bar.setFixedHeight(22)
         self.progress_bar.setVisible(False)
         bottom_layout.addWidget(self.progress_bar, stretch=1)
+
+        self.btn_cancel = QPushButton("취소")
+        self.btn_cancel.setFixedHeight(22)
+        self.btn_cancel.setFixedWidth(60)
+        self.btn_cancel.setVisible(False)
+        self.btn_cancel.clicked.connect(self._on_cancel_transcription)
+        bottom_layout.addWidget(self.btn_cancel)
 
         self.lbl_status = QLabel("")
         self.lbl_status.setVisible(False)
@@ -816,7 +931,145 @@ class MainWindow(QMainWindow):
         self.btn_copy.setVisible(show)
         self.btn_export.setVisible(show)
         self.btn_speakers.setVisible(False)
+        self.btn_edit.setVisible(False)
+        self.btn_save_edit.setVisible(False)
+        self.btn_cancel_edit.setVisible(False)
         self.lbl_empty.setVisible(not show)
+
+    # ── 타임라인 테이블 관리 (Feature 10) ──
+
+    def _populate_timeline(self, segments: list[dict]):
+        """세그먼트 목록으로 타임라인 테이블을 채운다."""
+        self.table_timeline.setRowCount(0)
+        self._cancel_edit_mode()
+
+        has_speakers = any(s.get("speaker") for s in segments)
+        self.table_timeline.setColumnHidden(2, not has_speakers)
+
+        # 화자 필터 업데이트
+        self.speaker_filter.blockSignals(True)
+        self.speaker_filter.clear()
+        self.speaker_filter.addItem("전체 화자", "")
+        if has_speakers:
+            speakers = sorted(set(s.get("speaker", "") for s in segments if s.get("speaker")))
+            for sp in speakers:
+                self.speaker_filter.addItem(sp, sp)
+        self.speaker_filter.setVisible(has_speakers)
+        self.speaker_filter.blockSignals(False)
+
+        for seg in segments:
+            self._add_timeline_row(seg)
+
+    def _add_timeline_row(self, seg: dict):
+        """테이블에 세그먼트 한 행을 추가한다."""
+        row = self.table_timeline.rowCount()
+        self.table_timeline.insertRow(row)
+
+        item_start = QTableWidgetItem(format_timestamp(seg["start"]))
+        item_start.setFlags(item_start.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        item_start.setData(Qt.ItemDataRole.UserRole, seg.get("id"))  # segment DB id
+
+        item_end = QTableWidgetItem(format_timestamp(seg["end"]))
+        item_end.setFlags(item_end.flags() & ~Qt.ItemFlag.ItemIsEditable)
+
+        item_speaker = QTableWidgetItem(seg.get("speaker") or "")
+        item_speaker.setFlags(item_speaker.flags() & ~Qt.ItemFlag.ItemIsEditable)
+
+        item_text = QTableWidgetItem(seg.get("text", ""))
+        item_text.setFlags(item_text.flags() & ~Qt.ItemFlag.ItemIsEditable)
+
+        self.table_timeline.setItem(row, 0, item_start)
+        self.table_timeline.setItem(row, 1, item_end)
+        self.table_timeline.setItem(row, 2, item_speaker)
+        self.table_timeline.setItem(row, 3, item_text)
+
+    # ── 타임라인 검색/필터 (Feature 1) ──
+
+    def _on_timeline_filter(self, *_args):
+        search_text = self.timeline_search.text().strip().lower()
+        speaker_data = self.speaker_filter.currentData()
+
+        for row in range(self.table_timeline.rowCount()):
+            text_item = self.table_timeline.item(row, 3)
+            speaker_item = self.table_timeline.item(row, 2)
+            text_match = not search_text or (text_item and search_text in text_item.text().lower())
+            speaker_match = not speaker_data or (speaker_item and speaker_item.text() == speaker_data)
+            self.table_timeline.setRowHidden(row, not (text_match and speaker_match))
+
+    # ── 편집 기능 (Feature 5) ──
+
+    def _on_toggle_edit(self):
+        if self._current_tid is None:
+            return
+        self._editing = True
+        self.btn_edit.setVisible(False)
+        self.btn_save_edit.setVisible(True)
+        self.btn_cancel_edit.setVisible(True)
+
+        # 타임라인 테이블의 텍스트 컬럼을 편집 가능하게
+        self.table_timeline.setEditTriggers(
+            QTableWidget.EditTrigger.DoubleClicked | QTableWidget.EditTrigger.EditKeyPressed
+        )
+        for row in range(self.table_timeline.rowCount()):
+            item = self.table_timeline.item(row, 3)
+            if item:
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+
+        # 전체 텍스트도 편집 가능하게
+        self.txt_fulltext.setReadOnly(False)
+        self.txt_fulltext.setStyleSheet("QPlainTextEdit { border: 2px solid #4CAF50; }")
+
+    def _on_save_edit(self):
+        if self._current_tid is None:
+            return
+
+        # 타임라인 테이블의 변경사항을 DB에 저장
+        for row in range(self.table_timeline.rowCount()):
+            start_item = self.table_timeline.item(row, 0)
+            text_item = self.table_timeline.item(row, 3)
+            if start_item and text_item:
+                seg_id = start_item.data(Qt.ItemDataRole.UserRole)
+                if seg_id is not None:
+                    self.db.update_segment_text(seg_id, text_item.text())
+
+        # full_text 재생성 및 저장
+        data = self.db.get_transcription(self._current_tid)
+        if data:
+            new_full = self._build_full_text(data.get("segments", []))
+            self.db.update_full_text(self._current_tid, new_full)
+
+        self._cancel_edit_mode()
+
+        # 화면 갱신
+        self._on_tree_item_changed(self.tree_widget.currentItem(), None)
+
+        self.lbl_status.setVisible(True)
+        self.lbl_status.setText("변경사항이 저장되었습니다.")
+        QTimer.singleShot(3000, lambda: self.lbl_status.setVisible(False))
+
+    def _on_cancel_edit(self):
+        self._cancel_edit_mode()
+        # 원본 데이터로 복원
+        self._on_tree_item_changed(self.tree_widget.currentItem(), None)
+
+    def _cancel_edit_mode(self):
+        self._editing = False
+        self.btn_edit.setVisible(self._current_tid is not None)
+        self.btn_save_edit.setVisible(False)
+        self.btn_cancel_edit.setVisible(False)
+        self.table_timeline.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        for row in range(self.table_timeline.rowCount()):
+            item = self.table_timeline.item(row, 3)
+            if item:
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        self.txt_fulltext.setReadOnly(True)
+        self.txt_fulltext.setStyleSheet("")
+
+    # ── 테마 실시간 적용 (Feature 9) ──
+
+    def _apply_theme(self, theme: str):
+        from src.main import get_stylesheet
+        QApplication.instance().setStyleSheet(get_stylesheet(theme))
 
     # --- Data loading ---
 
@@ -1004,12 +1257,13 @@ class MainWindow(QMainWindow):
             self._current_tid = None
             self._show_detail(True)
             self.btn_speakers.setVisible(False)
+            self.btn_edit.setVisible(False)
             self.lbl_title.setText(self._live_filename)
             self.lbl_info.setText("변환 진행 중...")
-            self.txt_timeline.setPlainText(self._live_timeline_text)
+            self._populate_timeline(self._live_segments)
             self.txt_fulltext.setPlainText(self._build_full_text(self._live_segments))
-            scrollbar = self.txt_timeline.verticalScrollBar()
-            scrollbar.setValue(scrollbar.maximum())
+            # 스크롤 끝으로
+            self.table_timeline.scrollToBottom()
             return
 
         item_type = current.data(0, Qt.ItemDataRole.UserRole + 1)
@@ -1038,20 +1292,12 @@ class MainWindow(QMainWindow):
         date = data["created_at"][:10]
         self.lbl_info.setText(f"날짜: {date}    길이: {dur}")
 
-        lines = []
-        for seg in data.get("segments", []):
-            ts_start = format_timestamp(seg["start"])
-            ts_end = format_timestamp(seg["end"])
-            speaker = seg.get("speaker")
-            if speaker:
-                lines.append(f"[{ts_start} ~ {ts_end}]  [{speaker}]  {seg['text']}")
-            else:
-                lines.append(f"[{ts_start} ~ {ts_end}]  {seg['text']}")
-        self.txt_timeline.setPlainText("\n".join(lines))
+        self._populate_timeline(data.get("segments", []))
         self.txt_fulltext.setPlainText(self._build_full_text(data.get("segments", [])))
 
         has_speakers = any(s.get("speaker") for s in data.get("segments", []))
         self.btn_speakers.setVisible(has_speakers)
+        self.btn_edit.setVisible(True)
 
     def _build_full_text(self, segments: list[dict]) -> str:
         if not segments:
@@ -1081,8 +1327,13 @@ class MainWindow(QMainWindow):
     # --- Actions ---
 
     def _on_settings(self):
+        old_theme = get_theme()
         dialog = SettingsDialog(self.db.db_path, self)
         dialog.exec()
+        # Feature 9: 테마 실시간 적용
+        new_theme = get_theme()
+        if new_theme != old_theme:
+            self._apply_theme(new_theme)
 
     def _on_add_video(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1095,17 +1346,41 @@ class MainWindow(QMainWindow):
             return
         self._add_file(path)
 
+    # ── 변환 취소 (Feature 3) ──
+
+    def _on_cancel_transcription(self):
+        if self._worker:
+            reply = QMessageBox.question(
+                self, "변환 취소",
+                "현재 진행 중인 변환을 취소하시겠습니까?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._worker.cancel()
+                self._remove_live_item()
+                self.btn_add.setEnabled(True)
+                self.progress_bar.setVisible(False)
+                self.btn_cancel.setVisible(False)
+                self.lbl_status.setVisible(False)
+                self._elapsed_timer.stop()
+                self._process_start_time = None
+                self._show_detail(False)
+                # 대기열의 다음 항목 시작
+                self._start_next_in_queue()
+
+    # ── 변환 시작/대기열 (Feature 2) ──
+
     def _start_transcription(self, video_path: str, settings: dict, hf_token: str | None = None):
-        self.btn_add.setEnabled(False)
+        self.btn_add.setEnabled(True)  # 대기열 추가를 위해 활성 유지
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
+        self.btn_cancel.setVisible(True)
         self.lbl_status.setVisible(True)
         self.lbl_status.setText("준비 중...")
 
         # 라이브 상태 초기화
         self._live_filename = os.path.basename(video_path)
         self._live_segments = []
-        self._live_timeline_text = ""
 
         # 목록 맨 위에 "변환 중" 항목 삽입
         self._live_item = QTreeWidgetItem()
@@ -1118,8 +1393,17 @@ class MainWindow(QMainWindow):
         self._show_detail(True)
         self.lbl_title.setText(self._live_filename)
         self.lbl_info.setText("변환 진행 중...")
-        self.txt_timeline.clear()
+        self.table_timeline.setRowCount(0)
         self.txt_fulltext.clear()
+        self.txt_log.clear()
+        self._last_progress_msg = ""
+
+        # 경과 시간 타이머 시작
+        self._process_start_time = time.time()
+        self._elapsed_timer.start()
+
+        # 처리 로그 탭으로 전환
+        self.tabs.setCurrentWidget(self.txt_log)
 
         self._thread = QThread()
         self._worker = TranscriberWorker(
@@ -1136,6 +1420,7 @@ class MainWindow(QMainWindow):
 
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._on_progress)
+        self._worker.log_message.connect(self._on_log_message)
         self._worker.segment_ready.connect(self._on_segment_ready)
         self._worker.finished.connect(self._on_finished)
         self._worker.error.connect(self._on_error)
@@ -1147,28 +1432,32 @@ class MainWindow(QMainWindow):
     def _on_progress(self, percent: int, message: str):
         self.progress_bar.setValue(percent)
         self.lbl_status.setText(message)
+        self._last_progress_msg = message
+
+    def _on_log_message(self, message: str):
+        self.txt_log.appendPlainText(message)
+        scrollbar = self.txt_log.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def _update_elapsed(self):
+        """1초마다 하단 상태 표시줄에 경과 시간을 갱신하여 프로그램이 동작 중임을 보여줌."""
+        if self._process_start_time is None:
+            return
+        elapsed = int(time.time() - self._process_start_time)
+        m, s = divmod(elapsed, 60)
+        elapsed_str = f"{m}분 {s}초" if m > 0 else f"{s}초"
+        base_msg = self._last_progress_msg
+        if " ⏱" in base_msg:
+            base_msg = base_msg.split(" ⏱")[0]
+        self.lbl_status.setText(f"{base_msg} ⏱ {elapsed_str}")
 
     def _on_segment_ready(self, seg: dict):
         self._live_segments.append(seg)
-        ts_start = format_timestamp(seg["start"])
-        ts_end = format_timestamp(seg["end"])
-        speaker = seg.get("speaker")
-        if speaker:
-            line = f"[{ts_start} ~ {ts_end}]  [{speaker}]  {seg['text']}"
-        else:
-            line = f"[{ts_start} ~ {ts_end}]  {seg['text']}"
-
-        # 타임라인 텍스트 누적 (다른 항목 보다가 돌아올 때 복원용)
-        if self._live_timeline_text:
-            self._live_timeline_text += "\n" + line
-        else:
-            self._live_timeline_text = line
 
         # "변환 중" 항목을 보고 있을 때만 UI 직접 업데이트
         if self._is_viewing_live():
-            self.txt_timeline.appendPlainText(line)
-            scrollbar = self.txt_timeline.verticalScrollBar()
-            scrollbar.setValue(scrollbar.maximum())
+            self._add_timeline_row(seg)
+            self.table_timeline.scrollToBottom()
             self.txt_fulltext.setPlainText(self._build_full_text(self._live_segments))
 
     def _on_finished(self, result: dict):
@@ -1184,51 +1473,86 @@ class MainWindow(QMainWindow):
         self._current_tid = tid
 
         # "변환 중" 항목 제거
-        was_viewing_live = self._is_viewing_live()
         self._remove_live_item()
 
         # 목록 새로고침
         self._load_list()
 
-        # 최종 결과 표시 (라이브 뷰를 보고 있었거나, 완료 시 항상 결과 표시)
+        # 최종 결과 표시
         self._show_detail(True)
         self.lbl_title.setText(result["filename"])
         dur = format_duration(result.get("duration"))
         self.lbl_info.setText(f"길이: {dur}")
 
-        lines = []
-        for seg in result["segments"]:
-            ts_start = format_timestamp(seg["start"])
-            ts_end = format_timestamp(seg["end"])
-            speaker = seg.get("speaker")
-            if speaker:
-                lines.append(f"[{ts_start} ~ {ts_end}]  [{speaker}]  {seg['text']}")
-            else:
-                lines.append(f"[{ts_start} ~ {ts_end}]  {seg['text']}")
-        self.txt_timeline.setPlainText("\n".join(lines))
-        self.txt_fulltext.setPlainText(self._build_full_text(result["segments"]))
+        # DB에서 세그먼트 재로드 (ID 포함)
+        data = self.db.get_transcription(tid)
+        if data:
+            self._populate_timeline(data.get("segments", []))
+            self.txt_fulltext.setPlainText(self._build_full_text(data.get("segments", [])))
+            has_speakers = any(s.get("speaker") for s in data.get("segments", []))
+            self.btn_speakers.setVisible(has_speakers)
+        self.btn_edit.setVisible(True)
 
-        has_speakers = any(s.get("speaker") for s in result.get("segments", []))
-        self.btn_speakers.setVisible(has_speakers)
-
-        self.btn_add.setEnabled(True)
         self.progress_bar.setVisible(False)
+        self.btn_cancel.setVisible(False)
         self.lbl_status.setVisible(False)
+        self._elapsed_timer.stop()
+        self._process_start_time = None
 
         elapsed_min = result.get("elapsed", 0) / 60
-        QMessageBox.information(
-            self, "완료", f"변환 완료! (소요시간: {elapsed_min:.1f}분)"
-        )
+
+        # Feature 7: OS 알림
+        self._notify("변환 완료", f"{result['filename']} (소요시간: {elapsed_min:.1f}분)")
+
+        # Feature 2: 대기열 - 다음 항목이 있으면 시작
+        if self._queue:
+            self._start_next_in_queue()
+        else:
+            self._update_queue_display()
+            QMessageBox.information(
+                self, "완료", f"변환 완료! (소요시간: {elapsed_min:.1f}분)"
+            )
 
     def _on_error(self, message: str):
         # "변환 중" 항목 제거
         self._remove_live_item()
 
-        self.btn_add.setEnabled(True)
         self.progress_bar.setVisible(False)
+        self.btn_cancel.setVisible(False)
         self.lbl_status.setVisible(False)
+        self._elapsed_timer.stop()
+        self._process_start_time = None
         self._show_detail(False)
+
+        # Feature 7: OS 알림
+        self._notify("변환 오류", f"변환 중 오류가 발생했습니다.")
+
         QMessageBox.critical(self, "오류", f"변환 중 오류 발생:\n{message}")
+
+        # Feature 2: 대기열 - 오류 시에도 다음 항목 시작
+        self._start_next_in_queue()
+
+    # ── 대기열 관리 (Feature 2) ──
+
+    def _update_queue_display(self):
+        if self._queue:
+            self.btn_add.setText(f"+ 파일 추가 (대기: {len(self._queue)})")
+        else:
+            self.btn_add.setText("+ 파일 추가")
+
+    def _start_next_in_queue(self):
+        if not self._queue:
+            self._update_queue_display()
+            return
+        path, settings, hf_token = self._queue.pop(0)
+        self._update_queue_display()
+        if not os.path.exists(path):
+            self._notify("파일 없음", f"대기열 파일을 찾을 수 없습니다: {os.path.basename(path)}")
+            self._start_next_in_queue()
+            return
+        self._start_transcription(path, settings, hf_token)
+
+    # ── 기타 액션 ──
 
     def _on_manage_speakers(self):
         if self._current_tid is None:
@@ -1265,7 +1589,6 @@ class MainWindow(QMainWindow):
 
             if renames:
                 # Use temp names to avoid conflicts when swapping
-                # (e.g. "화자 1"→"화자 2" and "화자 2"→"화자 1")
                 import uuid
                 temp_map = {}
                 for old_name in renames:
@@ -1371,7 +1694,21 @@ class MainWindow(QMainWindow):
     def _on_copy(self):
         current_tab = self.tabs.currentIndex()
         if current_tab == 0:
-            text = self.txt_timeline.toPlainText()
+            # 타임라인 테이블에서 복사
+            lines = []
+            for row in range(self.table_timeline.rowCount()):
+                if self.table_timeline.isRowHidden(row):
+                    continue
+                start = self.table_timeline.item(row, 0).text() if self.table_timeline.item(row, 0) else ""
+                end = self.table_timeline.item(row, 1).text() if self.table_timeline.item(row, 1) else ""
+                speaker = self.table_timeline.item(row, 2).text() if self.table_timeline.item(row, 2) else ""
+                text_item = self.table_timeline.item(row, 3)
+                text = text_item.text() if text_item else ""
+                if speaker and not self.table_timeline.isColumnHidden(2):
+                    lines.append(f"[{start} ~ {end}]  [{speaker}]  {text}")
+                else:
+                    lines.append(f"[{start} ~ {end}]  {text}")
+            text = "\n".join(lines)
         else:
             text = self.txt_fulltext.toPlainText()
 
@@ -1406,10 +1743,6 @@ class MainWindow(QMainWindow):
 
     def _add_file(self, path: str):
         """파일 경로로 트랜스크립션 시작 (버튼/드래그 앤 드롭 공용)."""
-        if self._thread and self._thread.isRunning():
-            QMessageBox.warning(self, "진행 중", "현재 변환이 진행 중입니다. 완료 후 다시 시도하세요.")
-            return
-
         settings_dialog = TranscriptionSettingsDialog(self)
         if settings_dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -1437,14 +1770,25 @@ class MainWindow(QMainWindow):
                         return
                     settings["use_diarization"] = False
 
+        # Feature 2: 변환 중이면 대기열에 추가
+        if self._thread and self._thread.isRunning():
+            self._queue.append((path, settings, hf_token))
+            self._update_queue_display()
+            filename = os.path.basename(path)
+            self.lbl_status.setVisible(True)
+            self.lbl_status.setText(f"대기열에 추가됨: {filename} (대기: {len(self._queue)})")
+            QTimer.singleShot(3000, lambda: None)  # 상태 유지
+            return
+
         self._start_transcription(path, settings, hf_token)
 
     def closeEvent(self, event):
         if self._thread and self._thread.isRunning():
+            queue_msg = f"\n(대기열: {len(self._queue)}개)" if self._queue else ""
             reply = QMessageBox.question(
                 self,
                 "종료 확인",
-                "변환이 진행 중입니다. 종료하시겠습니까?",
+                f"변환이 진행 중입니다. 종료하시겠습니까?{queue_msg}",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if reply == QMessageBox.StandardButton.No:
@@ -1453,4 +1797,7 @@ class MainWindow(QMainWindow):
             self._worker.cancel()
             self._thread.quit()
             self._thread.wait(5000)
+        self._elapsed_timer.stop()
+        if self._tray_icon:
+            self._tray_icon.hide()
         event.accept()
