@@ -1,9 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
 import sys
+import glob
 import imageio_ffmpeg
 import whisper
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 block_cipher = None
 
@@ -23,19 +24,31 @@ sys.path.insert(0, os.path.abspath('..'))
 from src.torchaudio_compat import apply_all_patches
 apply_all_patches()
 
-# ── NumPy 2.x C-extension 수동 수집 (collect_all이 .pyd를 누락함) ──
-import numpy
-import glob
-_np_dir = os.path.dirname(numpy.__file__)
-_np_binaries = []
-for _pyd in glob.glob(os.path.join(_np_dir, '**', '*.pyd'), recursive=True):
-    _rel_dir = os.path.relpath(os.path.dirname(_pyd), os.path.dirname(_np_dir))
-    _np_binaries.append((_pyd, _rel_dir))
+# ── NumPy 2.x / SciPy C-extension 수동 수집 ──
+# PyInstaller의 collect_all/collect_dynamic_libs가 .pyd를 0개 반환하는 버그가 있음.
+# 과학 패키지의 .pyd 파일을 glob으로 직접 찾아서 binaries에 추가한다.
+def _collect_pyd_files(package_name):
+    """패키지 디렉토리에서 .pyd 파일을 찾아 (src, dest_dir) 리스트로 반환."""
+    try:
+        pkg = __import__(package_name)
+        pkg_dir = os.path.dirname(pkg.__file__)
+        site_dir = os.path.dirname(pkg_dir)
+        result = []
+        for pyd in glob.glob(os.path.join(pkg_dir, '**', '*.pyd'), recursive=True):
+            rel_dir = os.path.relpath(os.path.dirname(pyd), site_dir)
+            result.append((pyd, rel_dir))
+        return result
+    except Exception:
+        return []
+
+_manual_binaries = []
+for _pkg in ['numpy', 'scipy']:
+    _manual_binaries.extend(_collect_pyd_files(_pkg))
 
 # collect_all로 수집 가능한 패키지 (torchaudio 패치 불필요)
 extra_datas = []
-extra_binaries = list(_np_binaries)
-extra_hiddenimports = []
+extra_binaries = list(_manual_binaries)
+extra_hiddenimports = list(collect_submodules('numpy'))
 
 for pkg in [
     'torchaudio', 'lightning', 'lightning_fabric', 'pytorch_lightning',
@@ -334,34 +347,6 @@ a = Analysis(
     hiddenimports=[
         'whisper',
         'PySide6',
-        'numpy',
-        'numpy._core',
-        'numpy._core._multiarray_umath',
-        'numpy._core.multiarray',
-        'numpy._core.umath',
-        'numpy._core._internal',
-        'numpy._core._methods',
-        'numpy._core._dtype',
-        'numpy._core._dtype_ctypes',
-        'numpy.core',
-        'numpy.core.multiarray',
-        'numpy.core.umath',
-        'numpy.core._internal',
-        'numpy.core._methods',
-        'numpy.fft',
-        'numpy.linalg',
-        'numpy.linalg.lapack_lite',
-        'numpy.linalg._umath_linalg',
-        'numpy.random',
-        'numpy.random.mtrand',
-        'numpy.random.bit_generator',
-        'numpy.random._generator',
-        'numpy.random._bounded_integers',
-        'numpy.random._common',
-        'numpy.random._mt19937',
-        'numpy.random._pcg64',
-        'numpy.random._philox',
-        'numpy.random._sfc64',
         'imageio_ffmpeg',
         'soundfile',
         '_soundfile_data',
