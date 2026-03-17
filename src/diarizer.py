@@ -125,7 +125,7 @@ def run_diarization(
     current_chunk_info = ""  # 청크 진행 정보 (heartbeat용)
     step_lock = threading.Lock()
 
-    def _hook(step_name, step_completed, step_total, *args, **kw):
+    def _hook(step_name, step_completed, step_total=None, *args, **kw):
         nonlocal completed_pct, current_step_name, current_chunk_info
 
         # 취소 체크 — hook은 단계 사이에 호출되므로 여기서 취소 가능
