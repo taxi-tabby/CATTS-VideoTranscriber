@@ -1,5 +1,6 @@
 import gc
 import os
+import time
 from collections import defaultdict
 
 import torch
@@ -12,6 +13,8 @@ _DIAR_STEPS = {
     "embeddings": ("화자 특징 추출", 0.4),
     "discrete_diarization": ("화자 할당", 0.2),
 }
+
+_DIAR_STEP_ORDER = list(_DIAR_STEPS.keys())
 
 
 def run_diarization(
@@ -66,20 +69,35 @@ def run_diarization(
 
     # pyannote hook으로 진행률 보고
     completed_pct = 10  # 모델 로드 후 시작점
+    diar_start_time = time.time()
+    last_step_idx = -1
 
     def _hook(step_name, *args, **kwargs):
-        nonlocal completed_pct
+        nonlocal completed_pct, last_step_idx
         step_info = _DIAR_STEPS.get(step_name)
         if not step_info or not progress_callback:
             return
         label, ratio = step_info
-        # 이 단계가 완료됨 → 해당 비율만큼 진행
+        step_idx = _DIAR_STEP_ORDER.index(step_name)
+        elapsed = time.time() - diar_start_time
+        elapsed_str = f" ({int(elapsed)}초 경과)"
+
+        # 이 단계가 완료됨 → 다음 단계 시작 메시지도 함께 전달
         completed_pct = 10 + int(90 * sum(
             r for name, (_, r) in _DIAR_STEPS.items()
-            if list(_DIAR_STEPS.keys()).index(name) <= list(_DIAR_STEPS.keys()).index(step_name)
+            if _DIAR_STEP_ORDER.index(name) <= step_idx
         ))
         completed_pct = min(completed_pct, 95)
-        progress_callback(completed_pct, f"화자 분석: {label} 완료")
+        progress_callback(completed_pct, f"화자 분석: {label} 완료{elapsed_str}")
+
+        # 다음 단계가 있으면 "시작 중" 메시지 전송
+        next_idx = step_idx + 1
+        if next_idx < len(_DIAR_STEP_ORDER):
+            next_step = _DIAR_STEP_ORDER[next_idx]
+            next_label = _DIAR_STEPS[next_step][0]
+            progress_callback(completed_pct, f"화자 분석: {next_label} 처리 중...{elapsed_str}")
+
+        last_step_idx = step_idx
 
     kwargs["hook"] = _hook
     diarization = pipeline(audio_path, **kwargs)

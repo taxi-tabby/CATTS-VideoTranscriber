@@ -53,6 +53,7 @@ class TranscriberWorker(QObject):
     """Whisper 변환 워커. QThread에서 실행."""
 
     progress = Signal(int, str)       # (percent, status_message)
+    log_message = Signal(str)         # detailed log for processing log tab
     segment_ready = Signal(dict)      # individual segment for real-time display
     finished = Signal(dict)           # transcription result
     error = Signal(str)               # error message
@@ -82,6 +83,12 @@ class TranscriberWorker(QObject):
     def cancel(self):
         self._cancelled = True
 
+    def _log(self, msg: str):
+        """타임스탬프 포함 로그 메시지 전송."""
+        import datetime
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        self.log_message.emit(f"[{ts}] {msg}")
+
     def run(self):
         tmp_wav = None
         try:
@@ -91,25 +98,31 @@ class TranscriberWorker(QObject):
             # Step 1: Extract audio
             step_total = 5 if use_diar else 4
             self.progress.emit(5, f"[1/{step_total}] 음성 추출 중...")
+            self._log(f"음성 추출 시작: {os.path.basename(self.video_path)}")
             tmp_wav = os.path.join(
                 tempfile.gettempdir(),
                 f"vt_{os.path.basename(self.video_path)}.wav",
             )
             extract_audio(self.video_path, tmp_wav, ffmpeg)
+            self._log("음성 추출 완료 (WAV 16kHz mono)")
             if self._cancelled:
                 return
 
             # Step 2: Load audio + preprocess
             self.progress.emit(8 if use_diar else 10, f"[2/{step_total}] 오디오 로드 및 전처리 중...")
+            self._log("오디오 로드 중...")
             audio = load_wav_as_numpy(tmp_wav)
             duration = get_video_duration(audio)  # 원본 영상 길이 (결과용)
+            self._log(f"오디오 길이: {duration:.1f}초")
             if self._cancelled:
                 return
 
             from src.audio_preprocess import preprocess as preprocess_audio
+            self._log("오디오 전처리 중 (노이즈 제거, 트리밍)...")
             audio, trim_offset_samples = preprocess_audio(audio)
             trim_offset_sec = trim_offset_samples / SAMPLE_RATE
             audio_duration = get_video_duration(audio)  # 트리밍 후 길이 (진행률용)
+            self._log(f"전처리 완료 (트리밍 후: {audio_duration:.1f}초)")
             if self._cancelled:
                 return
 
@@ -117,12 +130,14 @@ class TranscriberWorker(QObject):
             diarization_segments = None
             if use_diar:
                 self.progress.emit(8, f"[3/{step_total}] 화자 분석 중...")
+                self._log("화자 분리 모델 로드 중...")
                 from src.diarizer import run_diarization
 
                 # diarizer의 0~100을 전체 진행률 8~18에 매핑
                 def _diar_progress(pct: int, msg: str):
                     mapped = 8 + int(pct * 0.10)  # 8% ~ 18%
                     self.progress.emit(mapped, f"[3/{step_total}] {msg}")
+                    self._log(msg)
 
                 diarization_segments = run_diarization(
                     tmp_wav, self.hf_token,
@@ -131,6 +146,7 @@ class TranscriberWorker(QObject):
                     max_speakers=self.max_speakers,
                     progress_callback=_diar_progress,
                 )
+                self._log(f"화자 분석 완료: {len(diarization_segments)}개 구간 검출")
                 self.progress.emit(18, "화자 분석 완료")
                 if self._cancelled:
                     return
@@ -139,20 +155,24 @@ class TranscriberWorker(QObject):
             model_pct = 18 if use_diar else 15
             model_step = 4 if use_diar else 3
             self.progress.emit(model_pct, f"[{model_step}/{step_total}] Whisper 모델 로드 중...")
+            self._log(f"Whisper 모델 로드 중: {self.model_name}")
             from src.model_utils import get_whisper_cache_dir
             model = whisper.load_model(self.model_name, download_root=get_whisper_cache_dir())
+            self._log("Whisper 모델 로드 완료")
             if self._cancelled:
                 return
 
             # Step 4: Transcribe in chunks
             start_time = time.time()
             total_samples = len(audio)
+            total_chunks = (total_samples + CHUNK_SAMPLES - 1) // CHUNK_SAMPLES
             all_segments = []
             full_text_parts = []
             prev_text = ""
             transcribe_start = 22 if use_diar else 20
+            self._log(f"텍스트 변환 시작 (총 {total_chunks}개 청크, 언어: {self.language})")
 
-            for chunk_start in range(0, total_samples, CHUNK_SAMPLES):
+            for chunk_idx, chunk_start in enumerate(range(0, total_samples, CHUNK_SAMPLES)):
                 if self._cancelled:
                     return
 
@@ -161,6 +181,7 @@ class TranscriberWorker(QObject):
 
                 time_offset = chunk_start / SAMPLE_RATE
                 processed_sec = min(chunk_end / SAMPLE_RATE, audio_duration)
+                self._log(f"청크 {chunk_idx + 1}/{total_chunks} 변환 중 ({time_offset:.0f}s ~ {processed_sec:.0f}s)")
 
                 pct = transcribe_start + int((processed_sec / audio_duration) * (95 - transcribe_start))
                 pct = min(pct, 95)
@@ -215,6 +236,7 @@ class TranscriberWorker(QObject):
                 all_segments = map_speaker_labels(all_segments)
 
             elapsed = time.time() - start_time
+            self._log(f"변환 완료! 총 {len(all_segments)}개 세그먼트, 소요시간: {elapsed:.1f}초")
 
             if self._cancelled:
                 return
@@ -233,6 +255,7 @@ class TranscriberWorker(QObject):
             })
 
         except Exception as e:
+            self._log(f"오류 발생: {e}")
             self.error.emit(str(e))
         finally:
             if tmp_wav and os.path.exists(tmp_wav):

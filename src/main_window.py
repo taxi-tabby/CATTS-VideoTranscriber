@@ -666,6 +666,11 @@ class MainWindow(QMainWindow):
         self._live_filename = ""        # 변환 중 파일명
         self._live_segments = []        # 변환 중 세그먼트 누적
         self._live_timeline_text = ""   # 변환 중 타임라인 텍스트
+        self._last_progress_msg = ""    # 마지막 진행 메시지 (경과 시간 표시용)
+        self._elapsed_timer = QTimer()  # 경과 시간 갱신 타이머
+        self._elapsed_timer.setInterval(1000)
+        self._elapsed_timer.timeout.connect(self._update_elapsed)
+        self._process_start_time = None
 
         self.setWindowTitle("CATTS - Video Transcriber")
         self.setMinimumSize(900, 600)
@@ -750,7 +755,7 @@ class MainWindow(QMainWindow):
         self.lbl_info = QLabel("")
         right_layout.addWidget(self.lbl_info)
 
-        # Tabs: timeline / full text
+        # Tabs: timeline / full text / processing log
         self.tabs = QTabWidget()
 
         # Timeline tab
@@ -764,6 +769,13 @@ class MainWindow(QMainWindow):
         self.txt_fulltext.setReadOnly(True)
         self.txt_fulltext.setFont(QFont("Malgun Gothic", 10))
         self.tabs.addTab(self.txt_fulltext, "전체 텍스트")
+
+        # Processing log tab
+        self.txt_log = QPlainTextEdit()
+        self.txt_log.setReadOnly(True)
+        self.txt_log.setFont(QFont("Consolas", 9))
+        self.txt_log.setStyleSheet("QPlainTextEdit { background-color: #1e1e2e; color: #cdd6f4; }")
+        self.tabs.addTab(self.txt_log, "처리 로그")
 
         right_layout.addWidget(self.tabs, stretch=1)
 
@@ -1120,6 +1132,16 @@ class MainWindow(QMainWindow):
         self.lbl_info.setText("변환 진행 중...")
         self.txt_timeline.clear()
         self.txt_fulltext.clear()
+        self.txt_log.clear()
+        self._last_progress_msg = ""
+
+        # 경과 시간 타이머 시작
+        import time as _time
+        self._process_start_time = _time.time()
+        self._elapsed_timer.start()
+
+        # 처리 로그 탭으로 전환
+        self.tabs.setCurrentWidget(self.txt_log)
 
         self._thread = QThread()
         self._worker = TranscriberWorker(
@@ -1136,6 +1158,7 @@ class MainWindow(QMainWindow):
 
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._on_progress)
+        self._worker.log_message.connect(self._on_log_message)
         self._worker.segment_ready.connect(self._on_segment_ready)
         self._worker.finished.connect(self._on_finished)
         self._worker.error.connect(self._on_error)
@@ -1147,6 +1170,26 @@ class MainWindow(QMainWindow):
     def _on_progress(self, percent: int, message: str):
         self.progress_bar.setValue(percent)
         self.lbl_status.setText(message)
+        self._last_progress_msg = message
+
+    def _on_log_message(self, message: str):
+        self.txt_log.appendPlainText(message)
+        scrollbar = self.txt_log.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def _update_elapsed(self):
+        """1초마다 하단 상태 표시줄에 경과 시간을 갱신하여 프로그램이 동작 중임을 보여줌."""
+        if self._process_start_time is None:
+            return
+        import time as _time
+        elapsed = int(_time.time() - self._process_start_time)
+        m, s = divmod(elapsed, 60)
+        elapsed_str = f"{m}분 {s}초" if m > 0 else f"{s}초"
+        base_msg = self._last_progress_msg
+        # 이미 경과 시간이 포함된 경우 제거
+        if " ⏱" in base_msg:
+            base_msg = base_msg.split(" ⏱")[0]
+        self.lbl_status.setText(f"{base_msg} ⏱ {elapsed_str}")
 
     def _on_segment_ready(self, seg: dict):
         self._live_segments.append(seg)
@@ -1214,6 +1257,8 @@ class MainWindow(QMainWindow):
         self.btn_add.setEnabled(True)
         self.progress_bar.setVisible(False)
         self.lbl_status.setVisible(False)
+        self._elapsed_timer.stop()
+        self._process_start_time = None
 
         elapsed_min = result.get("elapsed", 0) / 60
         QMessageBox.information(
@@ -1227,6 +1272,8 @@ class MainWindow(QMainWindow):
         self.btn_add.setEnabled(True)
         self.progress_bar.setVisible(False)
         self.lbl_status.setVisible(False)
+        self._elapsed_timer.stop()
+        self._process_start_time = None
         self._show_detail(False)
         QMessageBox.critical(self, "오류", f"변환 중 오류 발생:\n{message}")
 
@@ -1453,4 +1500,5 @@ class MainWindow(QMainWindow):
             self._worker.cancel()
             self._thread.quit()
             self._thread.wait(5000)
+        self._elapsed_timer.stop()
         event.accept()
