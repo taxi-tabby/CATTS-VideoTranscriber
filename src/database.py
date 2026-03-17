@@ -1,6 +1,32 @@
 import sqlite3
 from datetime import datetime
 
+# 마이그레이션 목록: (버전, 설명, SQL 목록)
+# 버전은 1부터 순차적으로 증가. 새 마이그레이션은 맨 끝에 추가.
+MIGRATIONS: list[tuple[int, str, list[str]]] = [
+    (1, "segments.speaker 컬럼 추가", [
+        "ALTER TABLE segments ADD COLUMN speaker TEXT",
+    ]),
+    (2, "transcriptions.model_name, language 컬럼 추가", [
+        "ALTER TABLE transcriptions ADD COLUMN model_name TEXT",
+        "ALTER TABLE transcriptions ADD COLUMN language TEXT",
+    ]),
+    (3, "transcriptions.display_name 컬럼 추가", [
+        "ALTER TABLE transcriptions ADD COLUMN display_name TEXT",
+        "UPDATE transcriptions SET display_name = filename WHERE display_name IS NULL",
+    ]),
+    (4, "folders 테이블 및 transcriptions.folder_id 추가", [
+        """CREATE TABLE IF NOT EXISTS folders (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            name      TEXT NOT NULL,
+            parent_id INTEGER REFERENCES folders(id) ON DELETE CASCADE
+        )""",
+        "ALTER TABLE transcriptions ADD COLUMN folder_id INTEGER REFERENCES folders(id) ON DELETE SET NULL",
+    ]),
+]
+
+LATEST_VERSION = MIGRATIONS[-1][0] if MIGRATIONS else 0
+
 
 class Database:
     def __init__(self, db_path: str):
@@ -8,9 +34,12 @@ class Database:
         self._conn = sqlite3.connect(db_path)
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.row_factory = sqlite3.Row
-        self._create_tables()
+        self._init_schema()
 
-    def _create_tables(self):
+    # ── 스키마 초기화 & 마이그레이션 ──
+
+    def _init_schema(self):
+        """기본 테이블 생성 후 마이그레이션 실행."""
         self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS transcriptions (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -28,40 +57,54 @@ class Database:
                 end_time          REAL NOT NULL,
                 text              TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS folders (
-                id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                name      TEXT NOT NULL,
-                parent_id INTEGER REFERENCES folders(id) ON DELETE CASCADE
-            );
         """)
         self._conn.commit()
         self._run_migrations()
 
+    def _get_version(self) -> int:
+        return self._conn.execute("PRAGMA user_version").fetchone()[0]
+
+    def _set_version(self, version: int):
+        self._conn.execute(f"PRAGMA user_version = {int(version)}")
+
+    def _detect_legacy_version(self) -> int:
+        """user_version=0인 기존 DB의 실제 스키마 상태를 감지."""
+        version = 0
+
+        seg_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(segments)").fetchall()}
+        if "speaker" in seg_cols:
+            version = 1
+
+        trans_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(transcriptions)").fetchall()}
+        if "model_name" in trans_cols:
+            version = 2
+        if "display_name" in trans_cols:
+            version = 3
+        if "folder_id" in trans_cols:
+            version = 4
+
+        return version
+
     def _run_migrations(self):
-        seg_columns = [
-            row[1] for row in
-            self._conn.execute("PRAGMA table_info(segments)").fetchall()
-        ]
-        if "speaker" not in seg_columns:
-            self._conn.execute("ALTER TABLE segments ADD COLUMN speaker TEXT")
-            self._conn.commit()
+        current = self._get_version()
 
-        trans_columns = [
-            row[1] for row in
-            self._conn.execute("PRAGMA table_info(transcriptions)").fetchall()
-        ]
-        if "model_name" not in trans_columns:
-            self._conn.execute("ALTER TABLE transcriptions ADD COLUMN model_name TEXT")
-            self._conn.execute("ALTER TABLE transcriptions ADD COLUMN language TEXT")
-            self._conn.commit()
+        # 기존 DB: user_version=0이지만 이미 마이그레이션이 적용된 상태
+        if current == 0 and MIGRATIONS:
+            legacy = self._detect_legacy_version()
+            if legacy > 0:
+                self._set_version(legacy)
+                self._conn.commit()
+                current = legacy
 
-        if "display_name" not in trans_columns:
-            self._conn.execute("ALTER TABLE transcriptions ADD COLUMN display_name TEXT")
-            self._conn.execute("UPDATE transcriptions SET display_name = filename WHERE display_name IS NULL")
-            self._conn.commit()
+        if current >= LATEST_VERSION:
+            return
 
-        if "folder_id" not in trans_columns:
-            self._conn.execute("ALTER TABLE transcriptions ADD COLUMN folder_id INTEGER REFERENCES folders(id) ON DELETE SET NULL")
+        for version, description, sqls in MIGRATIONS:
+            if version <= current:
+                continue
+            for sql in sqls:
+                self._conn.execute(sql)
+            self._set_version(version)
             self._conn.commit()
 
     # ── 트랜스크립션 ──
