@@ -37,6 +37,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from PySide6.QtCore import Signal as _Signal
+
+
+class _DroppableTreeWidget(QTreeWidget):
+    """QTreeWidget that emits itemDropped after a drag-and-drop operation."""
+    itemDropped = _Signal()
+
+    def dropEvent(self, event):
+        super().dropEvent(event)
+        self.itemDropped.emit()
+
+
 from src.config import (
     get_hf_token, set_hf_token, delete_hf_token,
     get_whisper_model, set_whisper_model,
@@ -751,7 +763,7 @@ class MainWindow(QMainWindow):
         self.search_edit.textChanged.connect(self._on_search)
         left_layout.addWidget(self.search_edit)
 
-        self.tree_widget = QTreeWidget()
+        self.tree_widget = _DroppableTreeWidget()
         self.tree_widget.setHeaderHidden(True)
         self.tree_widget.setIndentation(16)
         self.tree_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -759,7 +771,7 @@ class MainWindow(QMainWindow):
         self.tree_widget.currentItemChanged.connect(self._on_tree_item_changed)
         self.tree_widget.setDragDropMode(QTreeWidget.DragDropMode.InternalMove)
         self.tree_widget.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self.tree_widget.model().rowsMoved.connect(self._on_rows_moved)
+        self.tree_widget.itemDropped.connect(self._on_rows_moved)
         left_layout.addWidget(self.tree_widget)
 
         # Bottom buttons
