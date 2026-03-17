@@ -71,10 +71,39 @@ def run_diarization(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     _log(f"화자 분석 디바이스: {device}")
+
     if device.type == "cuda":
         gpu_name = torch.cuda.get_device_name(0)
         gpu_mem = torch.cuda.get_device_properties(0).total_mem / (1024 ** 3)
         _log(f"GPU: {gpu_name} ({gpu_mem:.1f}GB)")
+        # GPU VRAM에 따라 batch_size 결정
+        if gpu_mem >= 8:
+            batch_size = 64
+        elif gpu_mem >= 4:
+            batch_size = 32
+        else:
+            batch_size = 16
+    else:
+        # CPU: 코어 수 기반 batch_size (너무 크면 메모리 부족)
+        cpu_count = os.cpu_count() or 4
+        batch_size = min(max(cpu_count, 8), 32)
+        # CPU 멀티스레딩 최적화
+        torch.set_num_threads(cpu_count)
+        torch.set_num_interop_threads(min(cpu_count, 4))
+        _log(f"CPU 코어: {cpu_count}개, torch 스레드: {cpu_count}")
+
+    # batch_size 적용
+    try:
+        pipeline.segmentation.batch_size = batch_size
+        _log(f"segmentation batch_size = {batch_size}")
+    except Exception:
+        pass
+    try:
+        pipeline.embedding.batch_size = batch_size
+        _log(f"embedding batch_size = {batch_size}")
+    except Exception:
+        pass
+
     pipeline.to(device)
 
     if progress_callback:
@@ -147,7 +176,8 @@ def run_diarization(
 
     def _run_pipeline():
         try:
-            result_container[0] = pipeline(audio_path, **kwargs)
+            with torch.inference_mode():
+                result_container[0] = pipeline(audio_path, **kwargs)
         except DiarizationCancelled as e:
             error_container[0] = e
         except Exception as e:
@@ -242,21 +272,37 @@ def assign_speakers(
 
     같은 화자의 여러 diarization 세그먼트 겹침을 합산하고,
     동률 시 해당 구간에서 가장 이른 start를 가진 화자를 선택.
+    정렬 + 투 포인터로 O((n+m) log n) 시간에 처리.
     """
+    import bisect
+
+    if not diarization_segments:
+        return [
+            {"start": w["start"], "end": w["end"], "text": w["text"], "speaker": None}
+            for w in whisper_segments
+        ]
+
+    # diarization 세그먼트를 시작 시간 기준 정렬
+    sorted_dsegs = sorted(diarization_segments, key=lambda d: d["start"])
+    dstarts = [d["start"] for d in sorted_dsegs]
+
     result = []
     for wseg in whisper_segments:
         speaker_overlap: dict[str, float] = defaultdict(float)
         speaker_earliest: dict[str, float] = {}
 
-        for dseg in diarization_segments:
-            overlap_start = max(wseg["start"], dseg["start"])
-            overlap_end = min(wseg["end"], dseg["end"])
-            overlap = max(0.0, overlap_end - overlap_start)
-
+        # wseg와 겹칠 수 있는 diarization 세그먼트만 탐색
+        # dseg.start < wseg.end 인 것 중에서, dseg.end > wseg.start 인 것만
+        right = bisect.bisect_left(dstarts, wseg["end"])
+        for i in range(right - 1, -1, -1):
+            dseg = sorted_dsegs[i]
+            if dseg["end"] <= wseg["start"]:
+                break
+            overlap = min(wseg["end"], dseg["end"]) - max(wseg["start"], dseg["start"])
             if overlap > 0:
                 speaker = dseg["speaker"]
                 speaker_overlap[speaker] += overlap
-                if speaker not in speaker_earliest:
+                if speaker not in speaker_earliest or dseg["start"] < speaker_earliest[speaker]:
                     speaker_earliest[speaker] = dseg["start"]
 
         best_speaker = None
