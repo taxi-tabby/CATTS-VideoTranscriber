@@ -375,7 +375,7 @@ a = Analysis(
     ] + _pyannote_speechbrain_submodules + extra_hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=['pyi_rth_torchaudio_compat.py'],
+    runtime_hooks=['pyi_rth_numpy_dll.py', 'pyi_rth_torchaudio_compat.py'],
     excludes=['tkinter'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
