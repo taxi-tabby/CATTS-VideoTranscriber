@@ -62,15 +62,33 @@ jobs:
             Write-Error "Build output not found: $exe"
             exit 1
           }
-          Write-Host "Build output size: $((Get-Item $exe).Length / 1MB) MB"
-          Write-Host "Total dist size: $((Get-ChildItem -Recurse build\output\dist\VideoTranscriber | Measure-Object -Property Length -Sum).Sum / 1MB) MB"
+          $exeSize = [math]::Round((Get-Item $exe).Length / 1MB, 1)
+          $totalSize = [math]::Round((Get-ChildItem -Recurse build\output\dist\VideoTranscriber | Measure-Object -Property Length -Sum).Sum / 1MB, 1)
+          Write-Host "EXE: ${exeSize}MB, Total: ${totalSize}MB"
+
           # numpy C-extension 존재 확인
-          $npCore = Get-ChildItem -Recurse build\output\dist\VideoTranscriber -Filter "_multiarray_umath*.pyd"
-          if ($npCore.Count -eq 0) {
-            Write-Error "FATAL: numpy _multiarray_umath.pyd not found in build output!"
+          $npCore = Get-ChildItem -Recurse build\output\dist\VideoTranscriber\_internal\numpy\_core -Filter "_multiarray_umath*.pyd" -ErrorAction SilentlyContinue
+          if (-not $npCore -or $npCore.Count -eq 0) {
+            Write-Error "FATAL: numpy _multiarray_umath.pyd not found!"
             exit 1
           }
-          Write-Host "numpy C-extension found: $($npCore.FullName)"
+          Write-Host "numpy C-ext OK: $($npCore.Name)"
+
+          # numpy.libs DLL 존재 확인
+          $npLibs = "build\output\dist\VideoTranscriber\_internal\numpy.libs"
+          if (-not (Test-Path $npLibs)) {
+            Write-Error "FATAL: numpy.libs directory not found!"
+            exit 1
+          }
+          $dlls = Get-ChildItem $npLibs -Filter "*.dll"
+          Write-Host "numpy.libs DLLs: $($dlls.Count) files"
+          $dlls | ForEach-Object { Write-Host "  $($_.Name) ($([math]::Round($_.Length / 1MB, 1))MB)" }
+
+          # DLL runtime hook 존재 확인
+          $hook = Get-ChildItem -Recurse build\output\dist\VideoTranscriber\_internal -Filter "pyi_rth_numpy_dll*" -ErrorAction SilentlyContinue
+          if (-not $hook) {
+            Write-Warning "Runtime hook pyi_rth_numpy_dll not found in build (may be in PYZ)"
+          }
 
       - name: Create zip archive
         shell: pwsh
