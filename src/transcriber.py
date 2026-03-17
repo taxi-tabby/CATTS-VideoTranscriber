@@ -137,7 +137,6 @@ class TranscriberWorker(QObject):
                 def _diar_progress(pct: int, msg: str):
                     mapped = 8 + int(pct * 0.10)  # 8% ~ 18%
                     self.progress.emit(mapped, f"[3/{step_total}] {msg}")
-                    self._log(msg)
 
                 diarization_segments = run_diarization(
                     tmp_wav, self.hf_token,
@@ -145,6 +144,8 @@ class TranscriberWorker(QObject):
                     min_speakers=self.min_speakers,
                     max_speakers=self.max_speakers,
                     progress_callback=_diar_progress,
+                    cancel_check=lambda: self._cancelled,
+                    log_callback=self._log,
                 )
                 self._log(f"화자 분석 완료: {len(diarization_segments)}개 구간 검출")
                 self.progress.emit(18, "화자 분석 완료")
