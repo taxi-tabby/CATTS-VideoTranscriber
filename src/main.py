@@ -78,6 +78,9 @@ _COMMON_STYLESHEET = """
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
     QTreeWidget { border-radius: 6px; padding: 4px; font-size: 13px; }
     QTreeWidget::item { padding: 4px 2px; border-radius: 4px; }
+    QTableWidget { border: none; font-size: 13px; }
+    QTableWidget::item { padding: 2px 4px; }
+    QHeaderView::section { padding: 4px 8px; font-size: 12px; font-weight: 600; }
 """
 
 _LIGHT_STYLESHEET = _COMMON_STYLESHEET + """
@@ -107,6 +110,9 @@ _LIGHT_STYLESHEET = _COMMON_STYLESHEET + """
     QComboBox { background-color: #FFFFFF; color: #2D3748; border: 1px solid #D4DCED;
         border-radius: 4px; padding: 4px 8px; }
     QGroupBox { color: #2D3748; }
+    QTableWidget { background-color: #FFFFFF; color: #2D3748; border: 1px solid #D4DCED; }
+    QTableWidget::item:selected { background-color: #E8EEFB; color: #2D3748; }
+    QHeaderView::section { background-color: #F0F4FA; color: #4A5568; border: none; border-bottom: 1px solid #D4DCED; }
 """
 
 _DARK_STYLESHEET = _COMMON_STYLESHEET + """
@@ -139,7 +145,15 @@ _DARK_STYLESHEET = _COMMON_STYLESHEET + """
     QSpinBox { background-color: #313244; color: #CDD6F4; border: 1px solid #45475A; border-radius: 4px; }
     QCheckBox { color: #CDD6F4; }
     QDialog { background-color: #1E1E2E; color: #CDD6F4; }
+    QTableWidget { background-color: #181825; color: #CDD6F4; border: 1px solid #45475A; }
+    QTableWidget::item:selected { background-color: #45475A; color: #CDD6F4; }
+    QHeaderView::section { background-color: #313244; color: #A6ADC8; border: none; border-bottom: 1px solid #45475A; }
 """
+
+
+def get_stylesheet(theme: str) -> str:
+    """테마에 맞는 스타일시트를 반환한다."""
+    return _DARK_STYLESHEET if theme == "dark" else _LIGHT_STYLESHEET
 
 
 def main():
@@ -148,10 +162,7 @@ def main():
     app.setStyle("Fusion")
     app.setWindowIcon(QIcon(get_icon_path()))
 
-    if get_theme() == "dark":
-        app.setStyleSheet(_DARK_STYLESHEET)
-    else:
-        app.setStyleSheet(_LIGHT_STYLESHEET)
+    app.setStyleSheet(get_stylesheet(get_theme()))
 
     apply_custom_paths()
     ensure_bundled_model()

@@ -106,7 +106,7 @@ class Database:
             return None
         result = dict(row)
         seg_rows = self._conn.execute(
-            "SELECT start_time as start, end_time as end, text, speaker FROM segments WHERE transcription_id = ? ORDER BY start_time",
+            "SELECT id, start_time as start, end_time as end, text, speaker FROM segments WHERE transcription_id = ? ORDER BY start_time",
             (tid,),
         ).fetchall()
         result["segments"] = [dict(s) for s in seg_rows]
@@ -185,6 +185,20 @@ class Database:
             (tid,),
         ).fetchall()
         return [row[0] for row in rows]
+
+    def update_segment_text(self, segment_id: int, new_text: str) -> None:
+        self._conn.execute(
+            "UPDATE segments SET text = ? WHERE id = ?",
+            (new_text, segment_id),
+        )
+        self._conn.commit()
+
+    def update_full_text(self, tid: int, full_text: str) -> None:
+        self._conn.execute(
+            "UPDATE transcriptions SET full_text = ? WHERE id = ?",
+            (full_text, tid),
+        )
+        self._conn.commit()
 
     def update_speaker_name(self, tid: int, old_name: str, new_name: str) -> None:
         self._conn.execute(
