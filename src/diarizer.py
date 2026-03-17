@@ -17,8 +17,7 @@ _DIAR_STEPS = {
 
 _DIAR_STEP_ORDER = list(_DIAR_STEPS.keys())
 
-# 화자 분석 최대 시간 (초). 이 시간을 초과하면 타임아웃 오류 발생.
-DIARIZATION_TIMEOUT = 1800  # 30분
+# 화자 분석 타임아웃 없음 — 오래 걸려도 완수해야 함.
 
 
 class DiarizationCancelled(Exception):
@@ -72,10 +71,39 @@ def run_diarization(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     _log(f"화자 분석 디바이스: {device}")
+
     if device.type == "cuda":
         gpu_name = torch.cuda.get_device_name(0)
         gpu_mem = torch.cuda.get_device_properties(0).total_mem / (1024 ** 3)
         _log(f"GPU: {gpu_name} ({gpu_mem:.1f}GB)")
+        # GPU VRAM에 따라 batch_size 결정
+        if gpu_mem >= 8:
+            batch_size = 64
+        elif gpu_mem >= 4:
+            batch_size = 32
+        else:
+            batch_size = 16
+    else:
+        # CPU: 코어 수 기반 batch_size (너무 크면 메모리 부족)
+        cpu_count = os.cpu_count() or 4
+        batch_size = min(max(cpu_count, 8), 32)
+        # CPU 멀티스레딩 최적화
+        torch.set_num_threads(cpu_count)
+        torch.set_num_interop_threads(min(cpu_count, 4))
+        _log(f"CPU 코어: {cpu_count}개, torch 스레드: {cpu_count}")
+
+    # batch_size 적용
+    try:
+        pipeline.segmentation.batch_size = batch_size
+        _log(f"segmentation batch_size = {batch_size}")
+    except Exception:
+        pass
+    try:
+        pipeline.embedding.batch_size = batch_size
+        _log(f"embedding batch_size = {batch_size}")
+    except Exception:
+        pass
+
     pipeline.to(device)
 
     if progress_callback:
@@ -94,10 +122,11 @@ def run_diarization(
     completed_pct = 10
     diar_start_time = time.time()
     current_step_name = "시작"  # 현재 진행 중인 단계 (heartbeat용)
+    current_chunk_info = ""  # 청크 진행 정보 (heartbeat용)
     step_lock = threading.Lock()
 
-    def _hook(step_name, *args, **kw):
-        nonlocal completed_pct, current_step_name
+    def _hook(step_name, step_completed, step_total, *args, **kw):
+        nonlocal completed_pct, current_step_name, current_chunk_info
 
         # 취소 체크 — hook은 단계 사이에 호출되므로 여기서 취소 가능
         if cancel_check and cancel_check():
@@ -109,31 +138,34 @@ def run_diarization(
         label, ratio = step_info
         step_idx = _DIAR_STEP_ORDER.index(step_name)
         elapsed = time.time() - diar_start_time
-        elapsed_str = f" ({int(elapsed)}초 경과)"
 
-        completed_pct = 10 + int(90 * sum(
+        # 청크 진행률 계산
+        chunk_str = ""
+        if step_total and step_total > 0:
+            chunk_str = f" [{step_completed}/{step_total}]"
+
+        # 이전 단계까지의 누적 + 현재 단계 내 청크 진행률 반영
+        prev_pct = sum(
             r for name, (_, r) in _DIAR_STEPS.items()
-            if _DIAR_STEP_ORDER.index(name) <= step_idx
-        ))
+            if _DIAR_STEP_ORDER.index(name) < step_idx
+        )
+        chunk_fraction = (step_completed / step_total) if (step_total and step_total > 0) else 1.0
+        completed_pct = 10 + int(90 * (prev_pct + ratio * chunk_fraction))
         completed_pct = min(completed_pct, 95)
-        progress_callback(completed_pct, f"화자 분석: {label} 완료{elapsed_str}")
-        _log(f"화자 분석 단계 완료: {label} ({int(elapsed)}초)")
+
+        elapsed_str = f" ({int(elapsed)}초 경과)"
+        with step_lock:
+            current_step_name = label
+            current_chunk_info = chunk_str
+
+        progress_callback(completed_pct, f"화자 분석: {label}{chunk_str}{elapsed_str}")
+        _log(f"화자 분석: {label}{chunk_str} ({int(elapsed)}초)")
 
         # GPU 메모리 상태 로깅
         if device.type == "cuda":
             mem_used = torch.cuda.memory_allocated() / (1024 ** 3)
             mem_reserved = torch.cuda.memory_reserved() / (1024 ** 3)
             _log(f"  GPU 메모리: {mem_used:.2f}GB 사용 / {mem_reserved:.2f}GB 예약")
-
-        # 다음 단계 시작 메시지
-        next_idx = step_idx + 1
-        if next_idx < len(_DIAR_STEP_ORDER):
-            next_step = _DIAR_STEP_ORDER[next_idx]
-            next_label = _DIAR_STEPS[next_step][0]
-            with step_lock:
-                current_step_name = next_label
-            progress_callback(completed_pct, f"화자 분석: {next_label} 처리 중...{elapsed_str}")
-            _log(f"화자 분석 단계 시작: {next_label}")
 
     kwargs["hook"] = _hook
 
@@ -144,7 +176,8 @@ def run_diarization(
 
     def _run_pipeline():
         try:
-            result_container[0] = pipeline(audio_path, **kwargs)
+            with torch.inference_mode():
+                result_container[0] = pipeline(audio_path, **kwargs)
         except DiarizationCancelled as e:
             error_container[0] = e
         except Exception as e:
@@ -171,31 +204,22 @@ def run_diarization(
                 _log("경고: 화자 분석 스레드가 응답하지 않아 강제 중단합니다.")
             raise RuntimeError("사용자가 화자 분석을 취소했습니다.")
 
-        # 타임아웃 체크
-        if elapsed > DIARIZATION_TIMEOUT:
-            _log(f"화자 분석 타임아웃: {int(elapsed)}초 경과 (제한: {DIARIZATION_TIMEOUT}초)")
-            raise RuntimeError(
-                f"화자 분석이 {DIARIZATION_TIMEOUT // 60}분 이상 걸려 중단되었습니다.\n"
-                "오디오가 너무 길거나 GPU 메모리가 부족할 수 있습니다.\n"
-                "화자 분리 없이 변환하거나, 더 짧은 파일로 시도해 보세요."
-            )
-
         # Heartbeat: 주기적으로 진행 상태 보고
         now = time.time()
         if now - last_heartbeat >= heartbeat_interval:
             last_heartbeat = now
             with step_lock:
                 step = current_step_name
+                chunk_info = current_chunk_info
             elapsed_m, elapsed_s = divmod(int(elapsed), 60)
             if elapsed_m > 0:
                 elapsed_str = f"{elapsed_m}분 {elapsed_s}초"
             else:
                 elapsed_str = f"{elapsed_s}초"
-
-            heartbeat_msg = f"화자 분석: {step} 처리 중... ({elapsed_str} 경과)"
+            heartbeat_msg = f"화자 분석: {step}{chunk_info} 처리 중... ({elapsed_str} 경과)"
             if progress_callback:
                 progress_callback(completed_pct, heartbeat_msg)
-            _log(f"[heartbeat] {step} 진행 중 ({elapsed_str})")
+            _log(f"[heartbeat] {step}{chunk_info} 진행 중 ({elapsed_str})")
 
             # GPU 메모리 상태
             if device.type == "cuda":
@@ -248,21 +272,37 @@ def assign_speakers(
 
     같은 화자의 여러 diarization 세그먼트 겹침을 합산하고,
     동률 시 해당 구간에서 가장 이른 start를 가진 화자를 선택.
+    정렬 + 투 포인터로 O((n+m) log n) 시간에 처리.
     """
+    import bisect
+
+    if not diarization_segments:
+        return [
+            {"start": w["start"], "end": w["end"], "text": w["text"], "speaker": None}
+            for w in whisper_segments
+        ]
+
+    # diarization 세그먼트를 시작 시간 기준 정렬
+    sorted_dsegs = sorted(diarization_segments, key=lambda d: d["start"])
+    dstarts = [d["start"] for d in sorted_dsegs]
+
     result = []
     for wseg in whisper_segments:
         speaker_overlap: dict[str, float] = defaultdict(float)
         speaker_earliest: dict[str, float] = {}
 
-        for dseg in diarization_segments:
-            overlap_start = max(wseg["start"], dseg["start"])
-            overlap_end = min(wseg["end"], dseg["end"])
-            overlap = max(0.0, overlap_end - overlap_start)
-
+        # wseg와 겹칠 수 있는 diarization 세그먼트만 탐색
+        # dseg.start < wseg.end 인 것 중에서, dseg.end > wseg.start 인 것만
+        right = bisect.bisect_left(dstarts, wseg["end"])
+        for i in range(right - 1, -1, -1):
+            dseg = sorted_dsegs[i]
+            if dseg["end"] <= wseg["start"]:
+                break
+            overlap = min(wseg["end"], dseg["end"]) - max(wseg["start"], dseg["start"])
             if overlap > 0:
                 speaker = dseg["speaker"]
                 speaker_overlap[speaker] += overlap
-                if speaker not in speaker_earliest:
+                if speaker not in speaker_earliest or dseg["start"] < speaker_earliest[speaker]:
                     speaker_earliest[speaker] = dseg["start"]
 
         best_speaker = None
