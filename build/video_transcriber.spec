@@ -24,26 +24,41 @@ sys.path.insert(0, os.path.abspath('..'))
 from src.torchaudio_compat import apply_all_patches
 apply_all_patches()
 
-# ── NumPy 2.x / SciPy C-extension 수동 수집 ──
-# PyInstaller의 collect_all/collect_dynamic_libs가 .pyd를 0개 반환하는 버그가 있음.
-# 과학 패키지의 .pyd 파일을 glob으로 직접 찾아서 binaries에 추가한다.
-def _collect_pyd_files(package_name):
-    """패키지 디렉토리에서 .pyd 파일을 찾아 (src, dest_dir) 리스트로 반환."""
+# ── NumPy 2.x / SciPy 수동 수집 ──
+# PyInstaller의 collect_dynamic_libs('numpy')가 0개를 반환하는 버그가 있음.
+# .pyd (C-extension)와 .libs/ (OpenBLAS 등 DLL)을 직접 수집한다.
+
+def _collect_package_binaries(package_name):
+    """패키지의 .pyd 파일과 {package}.libs/ DLL을 모두 수집."""
+    result = []
     try:
         pkg = __import__(package_name)
         pkg_dir = os.path.dirname(pkg.__file__)
         site_dir = os.path.dirname(pkg_dir)
-        result = []
+
+        # 1) 패키지 내부 .pyd 파일 수집
         for pyd in glob.glob(os.path.join(pkg_dir, '**', '*.pyd'), recursive=True):
             rel_dir = os.path.relpath(os.path.dirname(pyd), site_dir)
             result.append((pyd, rel_dir))
-        return result
+
+        # 2) {package}.libs/ 디렉토리의 DLL 수집 (OpenBLAS, MKL 등)
+        libs_dir = os.path.join(site_dir, f'{package_name}.libs')
+        if os.path.isdir(libs_dir):
+            for dll in glob.glob(os.path.join(libs_dir, '*.dll')):
+                result.append((dll, f'{package_name}.libs'))
+
+        # 3) 패키지 내부 .libs/ 디렉토리의 DLL (sklearn 등)
+        for dll in glob.glob(os.path.join(pkg_dir, '.libs', '*.dll')):
+            rel_dir = os.path.relpath(os.path.dirname(dll), site_dir)
+            result.append((dll, rel_dir))
+
     except Exception:
-        return []
+        pass
+    return result
 
 _manual_binaries = []
-for _pkg in ['numpy', 'scipy']:
-    _manual_binaries.extend(_collect_pyd_files(_pkg))
+for _pkg in ['numpy', 'scipy', 'pandas', 'llvmlite', 'sklearn']:
+    _manual_binaries.extend(_collect_package_binaries(_pkg))
 
 # collect_all로 수집 가능한 패키지 (torchaudio 패치 불필요)
 extra_datas = []
