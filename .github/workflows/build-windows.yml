@@ -54,6 +54,24 @@ jobs:
         env:
           WHISPER_MODEL_PATH: ""
 
+      - name: Verify build (smoke test)
+        shell: pwsh
+        run: |
+          $exe = "build\output\dist\VideoTranscriber\VideoTranscriber.exe"
+          if (-not (Test-Path $exe)) {
+            Write-Error "Build output not found: $exe"
+            exit 1
+          }
+          Write-Host "Build output size: $((Get-Item $exe).Length / 1MB) MB"
+          Write-Host "Total dist size: $((Get-ChildItem -Recurse build\output\dist\VideoTranscriber | Measure-Object -Property Length -Sum).Sum / 1MB) MB"
+          # numpy C-extension 존재 확인
+          $npCore = Get-ChildItem -Recurse build\output\dist\VideoTranscriber -Filter "_multiarray_umath*.pyd"
+          if ($npCore.Count -eq 0) {
+            Write-Error "FATAL: numpy _multiarray_umath.pyd not found in build output!"
+            exit 1
+          }
+          Write-Host "numpy C-extension found: $($npCore.FullName)"
+
       - name: Create zip archive
         shell: pwsh
         run: Compress-Archive -Path build\output\dist\VideoTranscriber\* -DestinationPath CATTS-Windows-x64.zip
