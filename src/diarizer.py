@@ -17,8 +17,7 @@ _DIAR_STEPS = {
 
 _DIAR_STEP_ORDER = list(_DIAR_STEPS.keys())
 
-# 화자 분석 최대 시간 (초). 이 시간을 초과하면 타임아웃 오류 발생.
-DIARIZATION_TIMEOUT = 1800  # 30분
+# 화자 분석 타임아웃 없음 — 오래 걸려도 완수해야 함.
 
 
 class DiarizationCancelled(Exception):
@@ -94,10 +93,11 @@ def run_diarization(
     completed_pct = 10
     diar_start_time = time.time()
     current_step_name = "시작"  # 현재 진행 중인 단계 (heartbeat용)
+    current_chunk_info = ""  # 청크 진행 정보 (heartbeat용)
     step_lock = threading.Lock()
 
-    def _hook(step_name, *args, **kw):
-        nonlocal completed_pct, current_step_name
+    def _hook(step_name, step_completed, step_total, *args, **kw):
+        nonlocal completed_pct, current_step_name, current_chunk_info
 
         # 취소 체크 — hook은 단계 사이에 호출되므로 여기서 취소 가능
         if cancel_check and cancel_check():
@@ -109,31 +109,34 @@ def run_diarization(
         label, ratio = step_info
         step_idx = _DIAR_STEP_ORDER.index(step_name)
         elapsed = time.time() - diar_start_time
-        elapsed_str = f" ({int(elapsed)}초 경과)"
 
-        completed_pct = 10 + int(90 * sum(
+        # 청크 진행률 계산
+        chunk_str = ""
+        if step_total and step_total > 0:
+            chunk_str = f" [{step_completed}/{step_total}]"
+
+        # 이전 단계까지의 누적 + 현재 단계 내 청크 진행률 반영
+        prev_pct = sum(
             r for name, (_, r) in _DIAR_STEPS.items()
-            if _DIAR_STEP_ORDER.index(name) <= step_idx
-        ))
+            if _DIAR_STEP_ORDER.index(name) < step_idx
+        )
+        chunk_fraction = (step_completed / step_total) if (step_total and step_total > 0) else 1.0
+        completed_pct = 10 + int(90 * (prev_pct + ratio * chunk_fraction))
         completed_pct = min(completed_pct, 95)
-        progress_callback(completed_pct, f"화자 분석: {label} 완료{elapsed_str}")
-        _log(f"화자 분석 단계 완료: {label} ({int(elapsed)}초)")
+
+        elapsed_str = f" ({int(elapsed)}초 경과)"
+        with step_lock:
+            current_step_name = label
+            current_chunk_info = chunk_str
+
+        progress_callback(completed_pct, f"화자 분석: {label}{chunk_str}{elapsed_str}")
+        _log(f"화자 분석: {label}{chunk_str} ({int(elapsed)}초)")
 
         # GPU 메모리 상태 로깅
         if device.type == "cuda":
             mem_used = torch.cuda.memory_allocated() / (1024 ** 3)
             mem_reserved = torch.cuda.memory_reserved() / (1024 ** 3)
             _log(f"  GPU 메모리: {mem_used:.2f}GB 사용 / {mem_reserved:.2f}GB 예약")
-
-        # 다음 단계 시작 메시지
-        next_idx = step_idx + 1
-        if next_idx < len(_DIAR_STEP_ORDER):
-            next_step = _DIAR_STEP_ORDER[next_idx]
-            next_label = _DIAR_STEPS[next_step][0]
-            with step_lock:
-                current_step_name = next_label
-            progress_callback(completed_pct, f"화자 분석: {next_label} 처리 중...{elapsed_str}")
-            _log(f"화자 분석 단계 시작: {next_label}")
 
     kwargs["hook"] = _hook
 
@@ -171,31 +174,22 @@ def run_diarization(
                 _log("경고: 화자 분석 스레드가 응답하지 않아 강제 중단합니다.")
             raise RuntimeError("사용자가 화자 분석을 취소했습니다.")
 
-        # 타임아웃 체크
-        if elapsed > DIARIZATION_TIMEOUT:
-            _log(f"화자 분석 타임아웃: {int(elapsed)}초 경과 (제한: {DIARIZATION_TIMEOUT}초)")
-            raise RuntimeError(
-                f"화자 분석이 {DIARIZATION_TIMEOUT // 60}분 이상 걸려 중단되었습니다.\n"
-                "오디오가 너무 길거나 GPU 메모리가 부족할 수 있습니다.\n"
-                "화자 분리 없이 변환하거나, 더 짧은 파일로 시도해 보세요."
-            )
-
         # Heartbeat: 주기적으로 진행 상태 보고
         now = time.time()
         if now - last_heartbeat >= heartbeat_interval:
             last_heartbeat = now
             with step_lock:
                 step = current_step_name
+                chunk_info = current_chunk_info
             elapsed_m, elapsed_s = divmod(int(elapsed), 60)
             if elapsed_m > 0:
                 elapsed_str = f"{elapsed_m}분 {elapsed_s}초"
             else:
                 elapsed_str = f"{elapsed_s}초"
-
-            heartbeat_msg = f"화자 분석: {step} 처리 중... ({elapsed_str} 경과)"
+            heartbeat_msg = f"화자 분석: {step}{chunk_info} 처리 중... ({elapsed_str} 경과)"
             if progress_callback:
                 progress_callback(completed_pct, heartbeat_msg)
-            _log(f"[heartbeat] {step} 진행 중 ({elapsed_str})")
+            _log(f"[heartbeat] {step}{chunk_info} 진행 중 ({elapsed_str})")
 
             # GPU 메모리 상태
             if device.type == "cuda":
