@@ -176,5 +176,68 @@ def main():
     sys.exit(exit_code)
 
 
+def selftest():
+    """빌드 검증용 self-test. 핵심 모듈 import를 테스트하고 결과를 파일로 출력."""
+    result_path = os.path.join(os.path.dirname(sys.executable), "_selftest.txt")
+    lines = []
+    ok = True
+
+    lines.append(f"frozen: {getattr(sys, 'frozen', False)}")
+    lines.append(f"executable: {sys.executable}")
+    lines.append(f"_MEIPASS: {getattr(sys, '_MEIPASS', 'N/A')}")
+    lines.append("")
+
+    # 핵심 모듈 import 테스트
+    test_modules = [
+        ("numpy", lambda m: m.__version__),
+        ("scipy", lambda m: m.__version__),
+        ("whisper", lambda m: getattr(m, '__version__', 'OK')),
+        ("torch", lambda m: m.__version__),
+        ("PySide6.QtWidgets", lambda m: "OK"),
+        ("soundfile", lambda m: "OK"),
+    ]
+
+    for mod_name, get_info in test_modules:
+        try:
+            mod = __import__(mod_name, fromlist=[""])
+            info = get_info(mod)
+            lines.append(f"OK  {mod_name}=={info}")
+        except Exception as e:
+            lines.append(f"FAIL {mod_name}: {type(e).__name__}: {e}")
+            ok = False
+
+    # numpy C-extension 상세 테스트
+    lines.append("")
+    try:
+        import numpy._core._multiarray_umath
+        lines.append("OK  numpy C-extensions loaded")
+    except Exception as e:
+        lines.append(f"FAIL numpy C-extensions: {e}")
+        ok = False
+
+    # DLL 경로 진단
+    lines.append("")
+    if getattr(sys, 'frozen', False):
+        meipass = sys._MEIPASS
+        for d in sorted(os.listdir(meipass)):
+            if d.endswith('.libs'):
+                libs_path = os.path.join(meipass, d)
+                if os.path.isdir(libs_path):
+                    contents = os.listdir(libs_path)
+                    lines.append(f"OK  {d}/ ({len(contents)} files)")
+                else:
+                    lines.append(f"MISSING {d}/")
+
+    lines.append("")
+    lines.append(f"RESULT: {'PASS' if ok else 'FAIL'}")
+
+    with open(result_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+    sys.exit(0 if ok else 1)
+
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        selftest()
     main()
