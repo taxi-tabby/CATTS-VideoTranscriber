@@ -92,15 +92,35 @@ jobs:
             exit 1
           }
 
-      - name: Create zip archive
+      - name: Create portable zip
         shell: pwsh
-        run: Compress-Archive -Path build\output\dist\VideoTranscriber\* -DestinationPath CATTS-${{ steps.version.outputs.tag }}-Windows-x64.zip
+        run: Compress-Archive -Path build\output\dist\VideoTranscriber\* -DestinationPath CATTS-${{ steps.version.outputs.tag }}-Portable-Windows-x64.zip
 
-      - name: Upload artifact
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.tag }}".TrimStart("v")
+          $env:APP_VERSION = $version
+          iscc build\installer.iss
+
+      - name: Copy installer
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.tag }}".TrimStart("v")
+          Copy-Item "build\output\installer\CATTS-v${version}-Setup-Windows-x64.exe" .
+
+      - name: Upload portable artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CATTS-${{ steps.version.outputs.tag }}-Windows-x64
-          path: CATTS-${{ steps.version.outputs.tag }}-Windows-x64.zip
+          name: CATTS-${{ steps.version.outputs.tag }}-Portable-Windows-x64
+          path: CATTS-${{ steps.version.outputs.tag }}-Portable-Windows-x64.zip
+          retention-days: 14
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CATTS-${{ steps.version.outputs.tag }}-Setup-Windows-x64
+          path: CATTS-${{ steps.version.outputs.tag }}-Setup-Windows-x64.exe
           retention-days: 14
 
       - name: Create Release
@@ -108,5 +128,7 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: CATTS ${{ steps.version.outputs.tag }}
-          files: CATTS-${{ steps.version.outputs.tag }}-Windows-x64.zip
+          files: |
+            CATTS-${{ steps.version.outputs.tag }}-Portable-Windows-x64.zip
+            CATTS-${{ steps.version.outputs.tag }}-Setup-Windows-x64.exe
           generate_release_notes: true
