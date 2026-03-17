@@ -13,7 +13,7 @@ jobs:
   build:
     if: github.event.pull_request.merged == true
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
 
     steps:
       - name: Checkout
@@ -42,8 +42,8 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-lock.txt
 
-      - name: Install PyTorch (CPU)
-        run: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+      - name: Install PyTorch (CUDA 12.4)
+        run: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
 
       - name: Install dependencies
         run: pip install -r requirements-lock.txt
