@@ -1,4 +1,5 @@
 import copy
+import gc
 import os
 import re
 import subprocess
@@ -50,6 +51,73 @@ def get_video_duration(audio: np.ndarray) -> float:
 SAMPLE_RATE = 16000
 CHUNK_SECONDS = 30
 CHUNK_SAMPLES = CHUNK_SECONDS * SAMPLE_RATE
+
+
+def _get_available_memory_mb() -> int:
+    """시스템 가용 메모리를 MB 단위로 반환. 측정 불가 시 0 반환."""
+    try:
+        import psutil
+        return int(psutil.virtual_memory().available / (1024 * 1024))
+    except ImportError:
+        pass
+    # psutil 없을 때 플랫폼별 fallback
+    import sys
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+            stat = MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(stat)
+            kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+            return int(stat.ullAvailPhys / (1024 * 1024))
+        else:
+            # Linux / macOS
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemAvailable:"):
+                        return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    return 0
+
+
+def _cap_workers_by_memory(requested_workers: int, model_mb: int, log_fn) -> int:
+    """가용 메모리를 확인하여 모델 복사본 수를 안전하게 제한한다."""
+    avail_mb = _get_available_memory_mb()
+    if avail_mb <= 0:
+        # 측정 불가 시 보수적으로 2개까지만 허용
+        capped = min(requested_workers, 2)
+        if capped < requested_workers:
+            log_fn(f"메모리 측정 불가 — 워커 수 제한: {requested_workers} → {capped}")
+        return capped
+
+    # 모델 메모리 (디스크 크기의 ~1.5배가 실제 메모리 사용량)
+    model_mem_mb = int(model_mb * 1.5)
+    # 시스템 여유분 2GB 확보
+    reserve_mb = 2048
+    usable_mb = max(0, avail_mb - reserve_mb)
+    max_copies = max(1, usable_mb // model_mem_mb)
+    capped = min(requested_workers, max_copies)
+
+    if capped < requested_workers:
+        log_fn(f"메모리 제한으로 워커 축소: {requested_workers} → {capped} "
+               f"(가용: {avail_mb}MB, 모델: ~{model_mem_mb}MB/개, 여유: {reserve_mb}MB)")
+    else:
+        log_fn(f"메모리 확인: {avail_mb}MB 가용 (모델 {capped}개 × ~{model_mem_mb}MB)")
+
+    return capped
 
 
 class TranscriberWorker(QObject):
@@ -191,6 +259,12 @@ class TranscriberWorker(QObject):
 
             MAX_RETRIES = 3
 
+            # 가용 메모리 기반 워커 수 제한 (모델당 ~3GB 복사 필요)
+            if effective_workers > 1:
+                from src.model_utils import MODEL_SIZES
+                model_mb = MODEL_SIZES.get(self.model_name, 500)
+                effective_workers = _cap_workers_by_memory(effective_workers, model_mb, self._log)
+
             if effective_workers > 1:
                 # ── 멀티스레드: 청크 병렬 처리 (CPU 전용) ──
                 self._log(f"텍스트 변환 시작 (총 {total_chunks}개 청크, 언어: {self.language}, 워커: {effective_workers})")
@@ -203,18 +277,34 @@ class TranscriberWorker(QObject):
                 _torch.set_num_threads(_torch_threads_per_worker)
                 self._log(f"torch 스레드: {_orig_threads} → {_torch_threads_per_worker} (워커 {effective_workers}개)")
 
+                # 워커 모델 사전 생성 후 원본 즉시 해제 (메모리 절감)
+                _worker_models = [model]  # 원본을 첫 번째 워커에 할당
+                for _ in range(effective_workers - 1):
+                    _worker_models.append(copy.deepcopy(model))
+                del model
+                gc.collect()
+                self._log(f"워커 모델 {effective_workers}개 준비 완료 (원본 해제)")
+
+                _model_lock = threading.Lock()
+                _model_idx = [0]
+
                 def _transcribe_chunk(chunk_audio):
                     if not hasattr(_thread_local, "model"):
-                        _thread_local.model = copy.deepcopy(model)
+                        with _model_lock:
+                            _thread_local.model = _worker_models[_model_idx[0]]
+                            _model_idx[0] += 1
                     return _thread_local.model.transcribe(chunk_audio, language=lang_arg, verbose=False)
 
-                # 청크 오디오 데이터 준비
+                # 청크 오디오 데이터 준비 (numpy 슬라이스 = view, 메모리 복사 없음)
                 chunks_audio = []
                 chunk_metas = []
                 for chunk_start in range(0, total_samples, CHUNK_SAMPLES):
                     chunk_end = min(chunk_start + CHUNK_SAMPLES, total_samples)
-                    chunks_audio.append(audio[chunk_start:chunk_end])
+                    chunks_audio.append(audio[chunk_start:chunk_end].copy())
                     chunk_metas.append((chunk_start, chunk_end))
+                # 원본 오디오 배열 해제 (청크 복사본만 유지)
+                del audio
+                gc.collect()
 
                 results_buf = {}
                 completed = 0
@@ -274,6 +364,13 @@ class TranscriberWorker(QObject):
                 finally:
                     # 취소/예외 여부와 무관하게 torch 스레드 수 복원
                     _torch.set_num_threads(_orig_threads)
+
+                # 워커 모델 메모리 해제 (pool 종료 후 thread-local은 접근 불가하므로 리스트로 정리)
+                del _worker_models
+                del _thread_local
+                del chunks_audio
+                gc.collect()
+                self._log("워커 모델 메모리 해제 완료")
 
                 if failed_chunks:
                     self._log(f"⚠ {len(failed_chunks)}개 청크 변환 실패 (청크 번호: {failed_chunks})")
@@ -373,6 +470,11 @@ class TranscriberWorker(QObject):
                     for seg in all_segments[chunk_seg_start:]:
                         self.segment_ready.emit(seg)
 
+                # 싱글스레드 완료 후 모델/오디오 해제
+                del model
+                del audio
+                gc.collect()
+
             # 최종 한글 라벨 매핑
             if diarization_segments:
                 from src.diarizer import map_speaker_labels
@@ -401,6 +503,16 @@ class TranscriberWorker(QObject):
             self._log(f"오류 발생: {e}")
             self.error.emit(str(e))
         finally:
+            # ── 메모리 정리 ──
+            # 예외/취소 등으로 정상 경로에서 해제하지 못한 대용량 객체 정리
+            gc.collect()
+            try:
+                import torch as _torch_cleanup
+                if _torch_cleanup.cuda.is_available():
+                    _torch_cleanup.cuda.empty_cache()
+            except Exception:
+                pass
+
             if tmp_wav and os.path.exists(tmp_wav):
                 try:
                     os.remove(tmp_wav)
