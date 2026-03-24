@@ -81,6 +81,11 @@ def suppress_non_speech(audio: np.ndarray, threshold: float = 0.35) -> np.ndarra
         speech_pad_ms=30,
     )
 
+    # Silero VAD 모델 메모리 해제
+    del model, utils, audio_tensor
+    import gc as _gc
+    _gc.collect()
+
     if not speech_timestamps:
         # 음성이 전혀 감지되지 않으면 원본 반환
         return audio
