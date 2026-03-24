@@ -7,14 +7,17 @@ import whisper
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 block_cipher = None
+_is_windows = sys.platform == 'win32'
+_is_macos = sys.platform == 'darwin'
 
 ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
 whisper_dir = os.path.dirname(whisper.__file__)
 
-# soundfile의 libsndfile DLL 경로
-import soundfile
-sf_dir = os.path.dirname(soundfile.__file__)
-libsndfile_dir = os.path.join(sf_dir, '_soundfile_data')
+# soundfile의 libsndfile DLL 경로 (Windows만 수동 포함 필요)
+if _is_windows:
+    import soundfile
+    sf_dir = os.path.dirname(soundfile.__file__)
+    libsndfile_dir = os.path.join(sf_dir, '_soundfile_data')
 
 # ── 빌드 시점에 torchaudio 호환성 패치 적용 ──
 # collect_all은 격리된 서브프로세스에서 import를 시도하므로 pyannote/speechbrain
@@ -24,41 +27,40 @@ sys.path.insert(0, os.path.abspath('..'))
 from src.torchaudio_compat import apply_all_patches
 apply_all_patches()
 
-# ── NumPy 2.x / SciPy 수동 수집 ──
-# PyInstaller의 collect_dynamic_libs('numpy')가 0개를 반환하는 버그가 있음.
+# ── NumPy 2.x / SciPy 수동 수집 (Windows 전용) ──
+# PyInstaller의 collect_dynamic_libs('numpy')가 0개를 반환하는 Windows 버그.
 # .pyd (C-extension)와 .libs/ (OpenBLAS 등 DLL)을 직접 수집한다.
-
-def _collect_package_binaries(package_name):
-    """패키지의 .pyd 파일과 {package}.libs/ DLL을 모두 수집."""
-    result = []
-    try:
-        pkg = __import__(package_name)
-        pkg_dir = os.path.dirname(pkg.__file__)
-        site_dir = os.path.dirname(pkg_dir)
-
-        # 1) 패키지 내부 .pyd 파일 수집
-        for pyd in glob.glob(os.path.join(pkg_dir, '**', '*.pyd'), recursive=True):
-            rel_dir = os.path.relpath(os.path.dirname(pyd), site_dir)
-            result.append((pyd, rel_dir))
-
-        # 2) {package}.libs/ 디렉토리의 DLL 수집 (OpenBLAS, MKL 등)
-        libs_dir = os.path.join(site_dir, f'{package_name}.libs')
-        if os.path.isdir(libs_dir):
-            for dll in glob.glob(os.path.join(libs_dir, '*.dll')):
-                result.append((dll, f'{package_name}.libs'))
-
-        # 3) 패키지 내부 .libs/ 디렉토리의 DLL (sklearn 등)
-        for dll in glob.glob(os.path.join(pkg_dir, '.libs', '*.dll')):
-            rel_dir = os.path.relpath(os.path.dirname(dll), site_dir)
-            result.append((dll, rel_dir))
-
-    except Exception:
-        pass
-    return result
+# Linux/macOS에서는 PyInstaller가 .so/.dylib를 정상 수집하므로 불필요.
 
 _manual_binaries = []
-for _pkg in ['numpy', 'scipy', 'pandas', 'llvmlite', 'sklearn']:
-    _manual_binaries.extend(_collect_package_binaries(_pkg))
+if _is_windows:
+    def _collect_package_binaries(package_name):
+        """패키지의 .pyd 파일과 {package}.libs/ DLL을 모두 수집."""
+        result = []
+        try:
+            pkg = __import__(package_name)
+            pkg_dir = os.path.dirname(pkg.__file__)
+            site_dir = os.path.dirname(pkg_dir)
+
+            for pyd in glob.glob(os.path.join(pkg_dir, '**', '*.pyd'), recursive=True):
+                rel_dir = os.path.relpath(os.path.dirname(pyd), site_dir)
+                result.append((pyd, rel_dir))
+
+            libs_dir = os.path.join(site_dir, f'{package_name}.libs')
+            if os.path.isdir(libs_dir):
+                for dll in glob.glob(os.path.join(libs_dir, '*.dll')):
+                    result.append((dll, f'{package_name}.libs'))
+
+            for dll in glob.glob(os.path.join(pkg_dir, '.libs', '*.dll')):
+                rel_dir = os.path.relpath(os.path.dirname(dll), site_dir)
+                result.append((dll, rel_dir))
+
+        except Exception:
+            pass
+        return result
+
+    for _pkg in ['numpy', 'scipy', 'pandas', 'llvmlite', 'sklearn']:
+        _manual_binaries.extend(_collect_package_binaries(_pkg))
 
 # collect_all로 수집 가능한 패키지 (torchaudio 패치 불필요)
 extra_datas = []
@@ -69,7 +71,7 @@ for pkg in [
     'torchaudio', 'lightning', 'lightning_fabric', 'pytorch_lightning',
     'asteroid_filterbanks', 'einops', 'hyperpyyaml', 'omegaconf',
     'pytorch_metric_learning', 'semver', 'sentencepiece',
-    'torch_audiomentations', 'torchmetrics',
+    'torch_audiomentations', 'torchmetrics', 'soundfile',
 ]:
     try:
         datas, binaries, hiddenimports = collect_all(pkg)
@@ -345,13 +347,21 @@ _pyannote_speechbrain_submodules = [
     'speechbrain.utils.train_logger',
 ]
 
+# ── 플랫폼별 바이너리 / 런타임 훅 ──
+_platform_binaries = [(ffmpeg_exe, 'imageio_ffmpeg/binaries')]
+if _is_windows:
+    _platform_binaries.append(
+        (os.path.join(libsndfile_dir, 'libsndfile_x64.dll'), '_soundfile_data')
+    )
+
+_runtime_hooks = ['pyi_rth_torchaudio_compat.py']
+if _is_windows:
+    _runtime_hooks.insert(0, 'pyi_rth_numpy_dll.py')
+
 a = Analysis(
     ['../src/main.py'],
     pathex=[os.path.abspath('..')],
-    binaries=[
-        (ffmpeg_exe, 'imageio_ffmpeg/binaries'),
-        (os.path.join(libsndfile_dir, 'libsndfile_x64.dll'), '_soundfile_data'),
-    ] + extra_binaries,
+    binaries=_platform_binaries + extra_binaries,
     datas=[
         (os.path.join(whisper_dir, 'assets'), 'whisper/assets'),
         (os.path.abspath('../assets/icon'), 'assets/icon'),
@@ -390,10 +400,8 @@ a = Analysis(
     ] + _pyannote_speechbrain_submodules + extra_hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=['pyi_rth_numpy_dll.py', 'pyi_rth_torchaudio_compat.py'],
+    runtime_hooks=_runtime_hooks,
     excludes=['tkinter'],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
     cipher=block_cipher,
     noarchive=False,
 )
@@ -411,7 +419,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
-    icon=os.path.abspath('../assets/icon/app.ico'),
+    icon=os.path.abspath('../assets/icon/app.ico') if _is_windows else None,
 )
 
 coll = COLLECT(
