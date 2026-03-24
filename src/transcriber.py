@@ -1,7 +1,9 @@
+import copy
 import os
 import re
 import subprocess
 import tempfile
+import threading
 import time
 import wave
 from concurrent.futures import ThreadPoolExecutor
@@ -187,71 +189,116 @@ class TranscriberWorker(QObject):
                 effective_workers = 1
                 self._log("GPU 모드 — 멀티스레드 비활성화 (CUDA 연산 사용)")
 
+            MAX_RETRIES = 3
+
             if effective_workers > 1:
                 # ── 멀티스레드: 청크 병렬 처리 (CPU 전용) ──
                 self._log(f"텍스트 변환 시작 (총 {total_chunks}개 청크, 언어: {self.language}, 워커: {effective_workers})")
 
+                # 워커별 독립 모델 복사본 생성 (PyTorch 모델은 thread-safe하지 않음)
+                _thread_local = threading.local()
+                _torch_threads_per_worker = max(1, (_torch.get_num_threads() // effective_workers))
+                self._log(f"워커당 torch 스레드: {_torch_threads_per_worker}")
+
                 def _transcribe_chunk(chunk_audio):
-                    return model.transcribe(chunk_audio, language=lang_arg, verbose=False)
+                    if not hasattr(_thread_local, "model"):
+                        _thread_local.model = copy.deepcopy(model)
+                        _torch.set_num_threads(_torch_threads_per_worker)
+                    return _thread_local.model.transcribe(chunk_audio, language=lang_arg, verbose=False)
 
-                # 모든 청크를 풀에 제출
+                # 청크 오디오 데이터 준비
+                chunks_audio = []
                 chunk_metas = []
-                futures = []
-                with ThreadPoolExecutor(max_workers=effective_workers) as pool:
-                    for chunk_start in range(0, total_samples, CHUNK_SAMPLES):
-                        chunk_end = min(chunk_start + CHUNK_SAMPLES, total_samples)
-                        chunk = audio[chunk_start:chunk_end]
-                        chunk_metas.append((chunk_start, chunk_end))
-                        futures.append(pool.submit(_transcribe_chunk, chunk))
+                for chunk_start in range(0, total_samples, CHUNK_SAMPLES):
+                    chunk_end = min(chunk_start + CHUNK_SAMPLES, total_samples)
+                    chunks_audio.append(audio[chunk_start:chunk_end])
+                    chunk_metas.append((chunk_start, chunk_end))
 
-                    # 순서대로 결과 수집
-                    completed = 0
-                    for chunk_idx, ((chunk_start, chunk_end), future) in enumerate(zip(chunk_metas, futures)):
+                results_buf = {}
+                completed = 0
+
+                with ThreadPoolExecutor(max_workers=effective_workers) as pool:
+                    # 초기 제출
+                    pending = {}  # future -> (chunk_idx, retry_count)
+                    for idx, chunk_audio in enumerate(chunks_audio):
+                        f = pool.submit(_transcribe_chunk, chunk_audio)
+                        pending[f] = (idx, 0)
+
+                    while pending:
                         if self._cancelled:
-                            pool.shutdown(wait=False, cancel_futures=True)
+                            for f in pending:
+                                f.cancel()
                             return
 
-                        time_offset = chunk_start / SAMPLE_RATE
-                        processed_sec = min(chunk_end / SAMPLE_RATE, audio_duration)
-                        self._log(f"청크 {chunk_idx + 1}/{total_chunks} 결과 대기 중 ({time_offset:.0f}s ~ {processed_sec:.0f}s)")
+                        done_futures = [f for f in pending if f.done()]
+                        if not done_futures:
+                            # 아직 완료된 게 없으면 짧게 대기 후 취소 확인
+                            time.sleep(0.3)
+                            continue
 
-                        result = future.result()
-                        completed += 1
+                        for future in done_futures:
+                            chunk_idx, retry_count = pending.pop(future)
 
-                        pct = transcribe_start + int((completed / total_chunks) * (95 - transcribe_start))
-                        pct = min(pct, 95)
-                        elapsed = time.time() - start_time
-                        if completed > 0 and elapsed > 1:
-                            eta = elapsed * (total_chunks - completed) / completed
-                            eta_min, eta_sec = divmod(int(eta), 60)
-                            eta_str = f" (남은 시간: {eta_min}분 {eta_sec}초)" if eta_min > 0 else f" (남은 시간: {eta_sec}초)"
-                        else:
-                            eta_str = ""
-                        self.progress.emit(pct, f"[{transcribe_step}/{step_total}] 변환 중... {completed}/{total_chunks} 청크{eta_str}")
-                        self._log(f"청크 {chunk_idx + 1}/{total_chunks} 완료")
+                            try:
+                                result = future.result()
+                            except Exception as chunk_err:
+                                if retry_count < MAX_RETRIES:
+                                    retry_count += 1
+                                    self._log(f"청크 {chunk_idx + 1}/{total_chunks} 실패 (재시도 {retry_count}/{MAX_RETRIES}): {chunk_err}")
+                                    f = pool.submit(_transcribe_chunk, chunks_audio[chunk_idx])
+                                    pending[f] = (chunk_idx, retry_count)
+                                    continue
+                                else:
+                                    self._log(f"청크 {chunk_idx + 1}/{total_chunks} 최종 실패: {chunk_err}")
+                                    result = {"text": "", "segments": []}
 
-                        chunk_text = result.get("text", "").strip()
-                        if chunk_text:
-                            full_text_parts.append(chunk_text)
+                            results_buf[chunk_idx] = result
+                            completed += 1
 
-                        chunk_seg_start = len(all_segments)
-                        for seg in result.get("segments", []):
-                            adjusted = {
-                                "start": seg["start"] + time_offset + trim_offset_sec,
-                                "end": seg["end"] + time_offset + trim_offset_sec,
-                                "text": seg["text"].strip(),
-                            }
-                            if adjusted["text"]:
-                                all_segments.append(adjusted)
+                            pct = transcribe_start + int((completed / total_chunks) * (95 - transcribe_start))
+                            pct = min(pct, 95)
+                            elapsed = time.time() - start_time
+                            if completed > 0 and elapsed > 1:
+                                eta = elapsed * (total_chunks - completed) / completed
+                                eta_min, eta_sec = divmod(int(eta), 60)
+                                eta_str = f" (남은 시간: {eta_min}분 {eta_sec}초)" if eta_min > 0 else f" (남은 시간: {eta_sec}초)"
+                            else:
+                                eta_str = ""
+                            self.progress.emit(pct, f"[{transcribe_step}/{step_total}] 변환 중... {completed}/{total_chunks} 청크{eta_str}")
+                            self._log(f"청크 {chunk_idx + 1}/{total_chunks} 완료")
 
-                        if diarization_segments:
-                            from src.diarizer import assign_speakers
-                            chunk_segs = all_segments[chunk_seg_start:]
-                            matched = assign_speakers(diarization_segments, chunk_segs)
-                            all_segments[chunk_seg_start:] = matched
+                # 순서대로 결과 처리 (pool 종료 후)
+                for idx in range(total_chunks):
+                    if self._cancelled:
+                        return
+                    res = results_buf.get(idx)
+                    if res is None:
+                        continue
+                    chunk_start, chunk_end = chunk_metas[idx]
+                    time_offset = chunk_start / SAMPLE_RATE
 
-                        for seg in all_segments[chunk_seg_start:]:
-                            self.segment_ready.emit(seg)
+                    chunk_text = res.get("text", "").strip()
+                    if chunk_text:
+                        full_text_parts.append(chunk_text)
+
+                    chunk_seg_start = len(all_segments)
+                    for seg in res.get("segments", []):
+                        adjusted = {
+                            "start": seg["start"] + time_offset + trim_offset_sec,
+                            "end": seg["end"] + time_offset + trim_offset_sec,
+                            "text": seg["text"].strip(),
+                        }
+                        if adjusted["text"]:
+                            all_segments.append(adjusted)
+
+                    if diarization_segments:
+                        from src.diarizer import assign_speakers
+                        chunk_segs = all_segments[chunk_seg_start:]
+                        matched = assign_speakers(diarization_segments, chunk_segs)
+                        all_segments[chunk_seg_start:] = matched
+
+                    for seg in all_segments[chunk_seg_start:]:
+                        self.segment_ready.emit(seg)
             else:
                 # ── 싱글스레드: 순차 처리 (이전 청크 컨텍스트 활용) ──
                 self._log(f"텍스트 변환 시작 (총 {total_chunks}개 청크, 언어: {self.language})")
@@ -287,6 +334,8 @@ class TranscriberWorker(QObject):
                         chunk, language=lang_arg, verbose=False,
                         initial_prompt=prompt,
                     )
+                    if self._cancelled:
+                        return
 
                     chunk_text = result.get("text", "").strip()
                     if chunk_text:

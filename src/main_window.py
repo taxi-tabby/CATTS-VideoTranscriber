@@ -1011,13 +1011,13 @@ class MainWindow(QMainWindow):
         bottom_layout.setContentsMargins(8, 4, 8, 8)
 
         self.progress_bar = QProgressBar()
-        self.progress_bar.setFixedHeight(22)
+        self.progress_bar.setFixedHeight(28)
         self.progress_bar.setVisible(False)
         bottom_layout.addWidget(self.progress_bar, stretch=1)
 
-        self.btn_cancel = QPushButton("취소")
-        self.btn_cancel.setFixedHeight(22)
-        self.btn_cancel.setFixedWidth(60)
+        self.btn_cancel = QPushButton("  취소  ")
+        self.btn_cancel.setFixedHeight(28)
+        self.btn_cancel.setMinimumWidth(70)
         self.btn_cancel.setVisible(False)
         self.btn_cancel.clicked.connect(self._on_cancel_transcription)
         bottom_layout.addWidget(self.btn_cancel)
@@ -1456,23 +1456,25 @@ class MainWindow(QMainWindow):
 
     def _on_cancel_transcription(self):
         if self._worker:
-            reply = QMessageBox.question(
-                self, "변환 취소",
-                "현재 진행 중인 변환을 취소하시겠습니까?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                self._worker.cancel()
-                self._remove_live_item()
-                self.btn_add.setEnabled(True)
-                self.progress_bar.setVisible(False)
-                self.btn_cancel.setVisible(False)
-                self.lbl_status.setVisible(False)
-                self._elapsed_timer.stop()
-                self._process_start_time = None
-                self._show_detail(False)
-                # 대기열의 다음 항목 시작
-                self._start_next_in_queue()
+            self._worker.cancel()
+            # 스레드 정리 — 취소 플래그 설정 후 스레드 종료 대기
+            if self._thread and self._thread.isRunning():
+                self._thread.quit()
+                if not self._thread.wait(3000):
+                    self._thread.terminate()
+                    self._thread.wait(1000)
+            self._worker = None
+            self._thread = None
+            self._remove_live_item()
+            self.btn_add.setEnabled(True)
+            self.progress_bar.setVisible(False)
+            self.btn_cancel.setVisible(False)
+            self.lbl_status.setVisible(False)
+            self._elapsed_timer.stop()
+            self._process_start_time = None
+            self._show_detail(False)
+            # 대기열의 다음 항목 시작
+            self._start_next_in_queue()
 
     # ── 변환 시작/대기열 (Feature 2) ──
 
