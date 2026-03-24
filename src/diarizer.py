@@ -34,6 +34,7 @@ def run_diarization(
     progress_callback=None,
     cancel_check=None,
     log_callback=None,
+    num_threads: int = 1,
 ) -> list[dict]:
     """pyannote.audio로 화자 분리 실행. 결과는 [{start, end, speaker}, ...] 리스트.
 
@@ -86,11 +87,18 @@ def run_diarization(
     else:
         # CPU: 코어 수 기반 batch_size (너무 크면 메모리 부족)
         cpu_count = os.cpu_count() or 4
-        batch_size = min(max(cpu_count, 8), 32)
-        # CPU 멀티스레딩 최적화
-        torch.set_num_threads(cpu_count)
-        torch.set_num_interop_threads(min(cpu_count, 4))
-        _log(f"CPU 코어: {cpu_count}개, torch 스레드: {cpu_count}")
+        if num_threads > 1:
+            thread_count = num_threads
+            batch_size = min(max(thread_count, 8), 32)
+        else:
+            thread_count = 1
+            batch_size = 8
+        torch.set_num_threads(thread_count)
+        try:
+            torch.set_num_interop_threads(min(thread_count, 4))
+        except RuntimeError:
+            pass  # 이미 설정된 경우 무시
+        _log(f"CPU 코어: {cpu_count}개, torch 스레드: {thread_count}")
 
     # batch_size 적용
     try:

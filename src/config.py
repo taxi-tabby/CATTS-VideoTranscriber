@@ -110,3 +110,28 @@ def set_hf_cache(path: str) -> None:
     config = load_config()
     config["hf_cache"] = path
     save_config(config)
+
+
+# ── 스레드 설정 ──
+
+def get_thread_config() -> dict:
+    config = load_config()
+    return {
+        "whisper_mode": config.get("whisper_thread_mode", "single"),
+        "whisper_min": config.get("whisper_thread_min", 2),
+        "whisper_max": config.get("whisper_thread_max", 0),
+        "diar_mode": config.get("diar_thread_mode", "single"),
+        "diar_min": config.get("diar_thread_min", 2),
+        "diar_max": config.get("diar_thread_max", 0),
+    }
+
+
+def set_thread_config(tc: dict) -> None:
+    config = load_config()
+    config["whisper_thread_mode"] = tc.get("whisper_mode", "single")
+    config["whisper_thread_min"] = tc.get("whisper_min", 2)
+    config["whisper_thread_max"] = tc.get("whisper_max", 0)
+    config["diar_thread_mode"] = tc.get("diar_mode", "single")
+    config["diar_thread_min"] = tc.get("diar_min", 2)
+    config["diar_thread_max"] = tc.get("diar_max", 0)
+    save_config(config)

@@ -57,6 +57,7 @@ from src.config import (
     get_db_dir, set_db_dir,
     get_whisper_cache, set_whisper_cache,
     get_hf_cache, set_hf_cache,
+    get_thread_config, set_thread_config,
 )
 from src.database import Database
 from src.model_utils import get_model_display_name
@@ -604,6 +605,70 @@ class TranscriptionSettingsDialog(QDialog):
 
         layout.addWidget(grp_diar)
 
+        # ── 처리 성능 ──
+        tc = get_thread_config()
+
+        grp_thread = QGroupBox("처리 성능")
+        thread_layout = QVBoxLayout(grp_thread)
+
+        # 음성 인식 스레드
+        wt_row = QHBoxLayout()
+        wt_row.addWidget(QLabel("음성 인식:"))
+        self.chk_whisper_multi = QCheckBox("멀티스레드")
+        self.chk_whisper_multi.setChecked(tc["whisper_mode"] == "multi")
+        self.chk_whisper_multi.toggled.connect(lambda c: self.whisper_thread_opts.setVisible(c))
+        wt_row.addWidget(self.chk_whisper_multi)
+        wt_row.addStretch()
+        thread_layout.addLayout(wt_row)
+
+        self.whisper_thread_opts = QWidget()
+        wto_layout = QHBoxLayout(self.whisper_thread_opts)
+        wto_layout.setContentsMargins(20, 0, 0, 0)
+        wto_layout.addWidget(QLabel("최소:"))
+        self.spin_wt_min = QSpinBox()
+        self.spin_wt_min.setRange(2, 64)
+        self.spin_wt_min.setValue(tc["whisper_min"])
+        wto_layout.addWidget(self.spin_wt_min)
+        wto_layout.addWidget(QLabel("최대:"))
+        self.spin_wt_max = QSpinBox()
+        self.spin_wt_max.setRange(0, 64)
+        self.spin_wt_max.setValue(tc["whisper_max"])
+        self.spin_wt_max.setSpecialValueText("무제한")
+        wto_layout.addWidget(self.spin_wt_max)
+        wto_layout.addStretch()
+        self.whisper_thread_opts.setVisible(tc["whisper_mode"] == "multi")
+        thread_layout.addWidget(self.whisper_thread_opts)
+
+        # 화자 분리 스레드
+        dt_row = QHBoxLayout()
+        dt_row.addWidget(QLabel("화자 분리:"))
+        self.chk_diar_multi = QCheckBox("멀티스레드")
+        self.chk_diar_multi.setChecked(tc["diar_mode"] == "multi")
+        self.chk_diar_multi.toggled.connect(lambda c: self.diar_thread_opts.setVisible(c))
+        dt_row.addWidget(self.chk_diar_multi)
+        dt_row.addStretch()
+        thread_layout.addLayout(dt_row)
+
+        self.diar_thread_opts = QWidget()
+        dto_layout = QHBoxLayout(self.diar_thread_opts)
+        dto_layout.setContentsMargins(20, 0, 0, 0)
+        dto_layout.addWidget(QLabel("최소:"))
+        self.spin_dt_min = QSpinBox()
+        self.spin_dt_min.setRange(2, 64)
+        self.spin_dt_min.setValue(tc["diar_min"])
+        dto_layout.addWidget(self.spin_dt_min)
+        dto_layout.addWidget(QLabel("최대:"))
+        self.spin_dt_max = QSpinBox()
+        self.spin_dt_max.setRange(0, 64)
+        self.spin_dt_max.setValue(tc["diar_max"])
+        self.spin_dt_max.setSpecialValueText("무제한")
+        dto_layout.addWidget(self.spin_dt_max)
+        dto_layout.addStretch()
+        self.diar_thread_opts.setVisible(tc["diar_mode"] == "multi")
+        thread_layout.addWidget(self.diar_thread_opts)
+
+        layout.addWidget(grp_thread)
+
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
         btn_cancel = QPushButton("취소")
@@ -657,6 +722,33 @@ class TranscriptionSettingsDialog(QDialog):
 
         language = self.combo_lang.currentData()
 
+        # 스레드 설정 저장
+        whisper_mode = "multi" if self.chk_whisper_multi.isChecked() else "single"
+        diar_mode = "multi" if self.chk_diar_multi.isChecked() else "single"
+        tc = {
+            "whisper_mode": whisper_mode,
+            "whisper_min": self.spin_wt_min.value(),
+            "whisper_max": self.spin_wt_max.value(),
+            "diar_mode": diar_mode,
+            "diar_min": self.spin_dt_min.value(),
+            "diar_max": self.spin_dt_max.value(),
+        }
+        set_thread_config(tc)
+
+        # 실제 워커 수 계산
+        cpu_count = os.cpu_count() or 4
+        if whisper_mode == "multi":
+            wt_max = tc["whisper_max"]
+            whisper_workers = wt_max if wt_max > 0 else max(tc["whisper_min"], cpu_count)
+        else:
+            whisper_workers = 1
+
+        if diar_mode == "multi":
+            dt_max = tc["diar_max"]
+            diar_threads = dt_max if dt_max > 0 else max(tc["diar_min"], cpu_count)
+        else:
+            diar_threads = 1
+
         return {
             "model_name": model,
             "language": language,
@@ -664,6 +756,8 @@ class TranscriptionSettingsDialog(QDialog):
             "num_speakers": num_speakers,
             "min_speakers": min_speakers,
             "max_speakers": max_speakers,
+            "whisper_workers": whisper_workers,
+            "diar_threads": diar_threads,
         }
 
 
@@ -1427,6 +1521,8 @@ class MainWindow(QMainWindow):
             num_speakers=settings.get("num_speakers"),
             min_speakers=settings.get("min_speakers"),
             max_speakers=settings.get("max_speakers"),
+            whisper_workers=settings.get("whisper_workers", 1),
+            diar_threads=settings.get("diar_threads", 1),
         )
         self._worker.moveToThread(self._thread)
 
