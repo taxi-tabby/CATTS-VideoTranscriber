@@ -197,13 +197,15 @@ class TranscriberWorker(QObject):
 
                 # 워커별 독립 모델 복사본 생성 (PyTorch 모델은 thread-safe하지 않음)
                 _thread_local = threading.local()
-                _torch_threads_per_worker = max(1, (_torch.get_num_threads() // effective_workers))
-                self._log(f"워커당 torch 스레드: {_torch_threads_per_worker}")
+                # torch.set_num_threads()는 프로세스 전역이므로 풀 생성 전에 한 번만 호출
+                _orig_threads = _torch.get_num_threads()
+                _torch_threads_per_worker = max(1, (_orig_threads // effective_workers))
+                _torch.set_num_threads(_torch_threads_per_worker)
+                self._log(f"torch 스레드: {_orig_threads} → {_torch_threads_per_worker} (워커 {effective_workers}개)")
 
                 def _transcribe_chunk(chunk_audio):
                     if not hasattr(_thread_local, "model"):
                         _thread_local.model = copy.deepcopy(model)
-                        _torch.set_num_threads(_torch_threads_per_worker)
                     return _thread_local.model.transcribe(chunk_audio, language=lang_arg, verbose=False)
 
                 # 청크 오디오 데이터 준비
@@ -216,56 +218,65 @@ class TranscriberWorker(QObject):
 
                 results_buf = {}
                 completed = 0
+                failed_chunks = []
 
-                with ThreadPoolExecutor(max_workers=effective_workers) as pool:
-                    # 초기 제출
-                    pending = {}  # future -> (chunk_idx, retry_count)
-                    for idx, chunk_audio in enumerate(chunks_audio):
-                        f = pool.submit(_transcribe_chunk, chunk_audio)
-                        pending[f] = (idx, 0)
+                try:
+                    with ThreadPoolExecutor(max_workers=effective_workers) as pool:
+                        # 초기 제출
+                        pending = {}  # future -> (chunk_idx, retry_count)
+                        for idx, chunk_audio in enumerate(chunks_audio):
+                            f = pool.submit(_transcribe_chunk, chunk_audio)
+                            pending[f] = (idx, 0)
 
-                    while pending:
-                        if self._cancelled:
-                            for f in pending:
-                                f.cancel()
-                            return
+                        while pending:
+                            if self._cancelled:
+                                for f in pending:
+                                    f.cancel()
+                                return
 
-                        done_futures = [f for f in pending if f.done()]
-                        if not done_futures:
-                            # 아직 완료된 게 없으면 짧게 대기 후 취소 확인
-                            time.sleep(0.3)
-                            continue
+                            done_futures = [f for f in pending if f.done()]
+                            if not done_futures:
+                                # 아직 완료된 게 없으면 짧게 대기 후 취소 확인
+                                time.sleep(0.3)
+                                continue
 
-                        for future in done_futures:
-                            chunk_idx, retry_count = pending.pop(future)
+                            for future in done_futures:
+                                chunk_idx, retry_count = pending.pop(future)
 
-                            try:
-                                result = future.result()
-                            except Exception as chunk_err:
-                                if retry_count < MAX_RETRIES:
-                                    retry_count += 1
-                                    self._log(f"청크 {chunk_idx + 1}/{total_chunks} 실패 (재시도 {retry_count}/{MAX_RETRIES}): {chunk_err}")
-                                    f = pool.submit(_transcribe_chunk, chunks_audio[chunk_idx])
-                                    pending[f] = (chunk_idx, retry_count)
-                                    continue
+                                try:
+                                    result = future.result()
+                                except Exception as chunk_err:
+                                    if retry_count < MAX_RETRIES:
+                                        retry_count += 1
+                                        self._log(f"청크 {chunk_idx + 1}/{total_chunks} 실패 (재시도 {retry_count}/{MAX_RETRIES}): {chunk_err}")
+                                        f = pool.submit(_transcribe_chunk, chunks_audio[chunk_idx])
+                                        pending[f] = (chunk_idx, retry_count)
+                                        continue
+                                    else:
+                                        self._log(f"청크 {chunk_idx + 1}/{total_chunks} 최종 실패: {chunk_err}")
+                                        failed_chunks.append(chunk_idx + 1)
+                                        result = {"text": "", "segments": []}
+
+                                results_buf[chunk_idx] = result
+                                completed += 1
+
+                                pct = transcribe_start + int((completed / total_chunks) * (95 - transcribe_start))
+                                pct = min(pct, 95)
+                                elapsed = time.time() - start_time
+                                if completed > 0 and elapsed > 1:
+                                    eta = elapsed * (total_chunks - completed) / completed
+                                    eta_min, eta_sec = divmod(int(eta), 60)
+                                    eta_str = f" (남은 시간: {eta_min}분 {eta_sec}초)" if eta_min > 0 else f" (남은 시간: {eta_sec}초)"
                                 else:
-                                    self._log(f"청크 {chunk_idx + 1}/{total_chunks} 최종 실패: {chunk_err}")
-                                    result = {"text": "", "segments": []}
+                                    eta_str = ""
+                                self.progress.emit(pct, f"[{transcribe_step}/{step_total}] 변환 중... {completed}/{total_chunks} 청크{eta_str}")
+                                self._log(f"청크 {chunk_idx + 1}/{total_chunks} 완료")
+                finally:
+                    # 취소/예외 여부와 무관하게 torch 스레드 수 복원
+                    _torch.set_num_threads(_orig_threads)
 
-                            results_buf[chunk_idx] = result
-                            completed += 1
-
-                            pct = transcribe_start + int((completed / total_chunks) * (95 - transcribe_start))
-                            pct = min(pct, 95)
-                            elapsed = time.time() - start_time
-                            if completed > 0 and elapsed > 1:
-                                eta = elapsed * (total_chunks - completed) / completed
-                                eta_min, eta_sec = divmod(int(eta), 60)
-                                eta_str = f" (남은 시간: {eta_min}분 {eta_sec}초)" if eta_min > 0 else f" (남은 시간: {eta_sec}초)"
-                            else:
-                                eta_str = ""
-                            self.progress.emit(pct, f"[{transcribe_step}/{step_total}] 변환 중... {completed}/{total_chunks} 청크{eta_str}")
-                            self._log(f"청크 {chunk_idx + 1}/{total_chunks} 완료")
+                if failed_chunks:
+                    self._log(f"⚠ {len(failed_chunks)}개 청크 변환 실패 (청크 번호: {failed_chunks})")
 
                 # 순서대로 결과 처리 (pool 종료 후)
                 for idx in range(total_chunks):

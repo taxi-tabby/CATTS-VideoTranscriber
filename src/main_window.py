@@ -1457,12 +1457,12 @@ class MainWindow(QMainWindow):
     def _on_cancel_transcription(self):
         if self._worker:
             self._worker.cancel()
-            # 스레드 정리 — 취소 플래그 설정 후 스레드 종료 대기
+            # 스레드 정리 — 취소 플래그 설정 후 스레드가 자체 종료할 때까지 대기
+            # terminate()는 사용하지 않음: ThreadPoolExecutor 워커가 실행 중일 때
+            # GIL 데드락 및 메모리 누수를 유발할 수 있음
             if self._thread and self._thread.isRunning():
                 self._thread.quit()
-                if not self._thread.wait(3000):
-                    self._thread.terminate()
-                    self._thread.wait(1000)
+                self._thread.wait(5000)
             self._worker = None
             self._thread = None
             self._remove_live_item()
@@ -1571,6 +1571,8 @@ class MainWindow(QMainWindow):
             self.txt_fulltext.setPlainText(self._build_full_text(self._live_segments))
 
     def _on_finished(self, result: dict):
+        self._worker = None
+        self._thread = None
         tid = self.db.add_transcription(
             filename=result["filename"],
             filepath=result["filepath"],
@@ -1624,6 +1626,8 @@ class MainWindow(QMainWindow):
             )
 
     def _on_error(self, message: str):
+        self._worker = None
+        self._thread = None
         # "변환 중" 항목 제거
         self._remove_live_item()
 

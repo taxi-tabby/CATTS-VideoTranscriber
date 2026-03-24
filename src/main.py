@@ -178,7 +178,16 @@ def main():
 
 def selftest():
     """빌드 검증용 self-test. 핵심 모듈 import를 테스트하고 결과를 파일로 출력."""
-    result_path = os.path.join(os.path.dirname(sys.executable), "_selftest.txt")
+    # frozen 환경에서 exe 디렉토리에 쓰기 시도, 실패 시 temp 디렉토리 사용
+    _selftest_dir = os.path.dirname(sys.executable)
+    result_path = os.path.join(_selftest_dir, "_selftest.txt")
+    try:
+        with open(result_path, "w") as _test:
+            pass
+        os.remove(result_path)
+    except OSError:
+        import tempfile
+        result_path = os.path.join(tempfile.gettempdir(), "_selftest.txt")
     lines = []
     ok = True
 
@@ -215,8 +224,9 @@ def selftest():
         lines.append(f"FAIL numpy C-extensions: {e}")
         ok = False
 
-    # DLL 경로 진단
+    # 공유 라이브러리 경로 진단
     lines.append("")
+    lines.append(f"platform: {sys.platform}")
     if getattr(sys, 'frozen', False):
         meipass = sys._MEIPASS
         for d in sorted(os.listdir(meipass)):
@@ -234,10 +244,15 @@ def selftest():
     with open(result_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
+    # CI에서 결과 파일 위치를 찾을 수 있도록 stdout에도 출력
+    print(f"SELFTEST_RESULT_PATH={result_path}")
+    print("\n".join(lines))
+
     sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         selftest()
-    main()
+    else:
+        main()
