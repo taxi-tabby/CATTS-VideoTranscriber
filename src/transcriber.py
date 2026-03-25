@@ -279,8 +279,14 @@ class TranscriberWorker(QObject):
 
                 # 워커 모델 사전 생성 후 원본 즉시 해제 (메모리 절감)
                 _worker_models = [model]  # 원본을 첫 번째 워커에 할당
-                for _ in range(effective_workers - 1):
-                    _worker_models.append(copy.deepcopy(model))
+                for i in range(effective_workers - 1):
+                    try:
+                        _worker_models.append(copy.deepcopy(model))
+                    except Exception as e:
+                        self._log(f"모델 복사 실패 (워커 {i+2}/{effective_workers}): {e}")
+                        self._log(f"워커 수를 {len(_worker_models)}개로 축소합니다")
+                        effective_workers = len(_worker_models)
+                        break
                 del model
                 gc.collect()
                 self._log(f"워커 모델 {effective_workers}개 준비 완료 (원본 해제)")
@@ -291,8 +297,13 @@ class TranscriberWorker(QObject):
                 def _transcribe_chunk(chunk_audio):
                     if not hasattr(_thread_local, "model"):
                         with _model_lock:
-                            _thread_local.model = _worker_models[_model_idx[0]]
-                            _model_idx[0] += 1
+                            idx = _model_idx[0]
+                            if idx >= len(_worker_models):
+                                idx = len(_worker_models) - 1
+                                self._log(f"[경고] 모델 인덱스 범위 초과 — 마지막 모델로 폴백 (idx→{idx})")
+                            else:
+                                _model_idx[0] += 1
+                            _thread_local.model = _worker_models[idx]
                     return _thread_local.model.transcribe(chunk_audio, language=lang_arg, verbose=False)
 
                 # 청크 오디오 데이터 준비 (numpy 슬라이스 = view, 메모리 복사 없음)
