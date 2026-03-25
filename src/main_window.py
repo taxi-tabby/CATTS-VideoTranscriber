@@ -1460,11 +1460,7 @@ class MainWindow(QMainWindow):
             # 스레드 정리 — 취소 플래그 설정 후 스레드가 자체 종료할 때까지 대기
             # terminate()는 사용하지 않음: ThreadPoolExecutor 워커가 실행 중일 때
             # GIL 데드락 및 메모리 누수를 유발할 수 있음
-            if self._thread and self._thread.isRunning():
-                self._thread.quit()
-                self._thread.wait(5000)
-            self._worker = None
-            self._thread = None
+            self._cleanup_thread(wait_ms=5000)
             self._remove_live_item()
             self.btn_add.setEnabled(True)
             self.progress_bar.setVisible(False)
@@ -1534,8 +1530,10 @@ class MainWindow(QMainWindow):
         self._worker.segment_ready.connect(self._on_segment_ready)
         self._worker.finished.connect(self._on_finished)
         self._worker.error.connect(self._on_error)
-        self._worker.finished.connect(self._thread.quit)
-        self._worker.error.connect(self._thread.quit)
+
+        # QThread 안전 정리: thread.finished(이벤트 루프 종료 후)에서 deleteLater
+        self._thread.finished.connect(self._worker.deleteLater)
+        self._thread.finished.connect(self._thread.deleteLater)
 
         self._thread.start()
 
@@ -1570,9 +1568,26 @@ class MainWindow(QMainWindow):
             self.table_timeline.scrollToBottom()
             self.txt_fulltext.setPlainText(self._build_full_text(self._live_segments))
 
-    def _on_finished(self, result: dict):
+    def _cleanup_thread(self, wait_ms: int = 0):
+        """QThread/Worker 안전 정리.
+
+        quit()으로 이벤트 루프 종료를 요청하고 참조를 해제한다.
+        실제 C++ 객체 소멸은 thread.finished → deleteLater 체인에 의해
+        Qt 이벤트 루프가 안전한 시점에 처리된다.
+
+        Args:
+            wait_ms: >0이면 스레드 종료까지 동기 대기 (취소/종료 시 사용).
+        """
+        if self._thread is not None:
+            self._thread.quit()
+            if wait_ms > 0:
+                self._thread.wait(wait_ms)
         self._worker = None
         self._thread = None
+
+    def _on_finished(self, result: dict):
+        self._cleanup_thread()
+
         tid = self.db.add_transcription(
             filename=result["filename"],
             filepath=result["filepath"],
@@ -1626,8 +1641,8 @@ class MainWindow(QMainWindow):
             )
 
     def _on_error(self, message: str):
-        self._worker = None
-        self._thread = None
+        self._cleanup_thread()
+
         # "변환 중" 항목 제거
         self._remove_live_item()
 
@@ -1909,8 +1924,7 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
             self._worker.cancel()
-            self._thread.quit()
-            self._thread.wait(5000)
+            self._cleanup_thread(wait_ms=5000)
         self._elapsed_timer.stop()
         if self._tray_icon:
             self._tray_icon.hide()
