@@ -178,6 +178,11 @@ def main():
 
     db = Database(get_db_path())
     window = MainWindow(db)
+
+    # 전역 예외 훅 설치 — GUI 스레드의 미처리 예외를 캐치하여 보고 다이얼로그 표시
+    from src.crash_reporter import install_global_exception_hook
+    install_global_exception_hook(lambda: window)
+
     window.show()
 
     exit_code = app.exec()
