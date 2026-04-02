@@ -44,6 +44,16 @@ def load_wav_as_numpy(audio_path: str) -> np.ndarray:
     return np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
 
 
+def save_numpy_as_wav(audio: np.ndarray, wav_path: str, sample_rate: int = 16000) -> None:
+    """float32 numpy 배열을 16-bit PCM WAV로 저장한다."""
+    pcm = np.clip(audio * 32768.0, -32768, 32767).astype(np.int16)
+    with wave.open(wav_path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm.tobytes())
+
+
 def get_video_duration(audio: np.ndarray) -> float:
     return len(audio) / 16000.0
 
@@ -167,6 +177,7 @@ class TranscriberWorker(QObject):
 
     def run(self):
         tmp_wav = None
+        tmp_clean_wav = None
         try:
             ffmpeg = get_ffmpeg_exe()
             use_diar = self.use_diarization and self.hf_token
@@ -206,11 +217,22 @@ class TranscriberWorker(QObject):
                 return
 
             # Step 2.5: Speaker diarization (optional)
+            # 전처리된 오디오를 WAV로 저장하여 화자 분석에 전달
+            # (노이즈 제거 후 오디오로 분석해야 화자 embedding 정확도 향상)
             diarization_segments = None
+            tmp_clean_wav = None
             if use_diar:
                 self.progress.emit(8, f"[3/{step_total}] 화자 분석 중...")
                 self._log("화자 분리 모델 로드 중...")
                 from src.diarizer import run_diarization
+
+                # 전처리된 오디오를 임시 WAV로 저장
+                tmp_clean_wav = os.path.join(
+                    tempfile.gettempdir(),
+                    f"vt_{os.path.basename(self.video_path)}_clean.wav",
+                )
+                save_numpy_as_wav(audio, tmp_clean_wav)
+                self._log("전처리된 오디오를 화자 분석에 사용")
 
                 # diarizer의 0~100을 전체 진행률 8~18에 매핑
                 def _diar_progress(pct: int, msg: str):
@@ -218,7 +240,7 @@ class TranscriberWorker(QObject):
                     self.progress.emit(mapped, f"[3/{step_total}] {msg}")
 
                 diarization_segments = run_diarization(
-                    tmp_wav, self.hf_token,
+                    tmp_clean_wav, self.hf_token,
                     num_speakers=self.num_speakers,
                     min_speakers=self.min_speakers,
                     max_speakers=self.max_speakers,
@@ -227,6 +249,12 @@ class TranscriberWorker(QObject):
                     log_callback=self._log,
                     num_threads=self.diar_threads,
                 )
+                # diarization 타임스탬프에 트리밍 오프셋 적용
+                # (전처리된 오디오 기준 → 원본 기준으로 보정)
+                if trim_offset_sec > 0:
+                    for dseg in diarization_segments:
+                        dseg["start"] += trim_offset_sec
+                        dseg["end"] += trim_offset_sec
                 self._log(f"화자 분석 완료: {len(diarization_segments)}개 구간 검출")
                 self.progress.emit(18, "화자 분석 완료")
                 if self._cancelled:
@@ -312,7 +340,10 @@ class TranscriberWorker(QObject):
                                 )
                             _model_idx[0] += 1
                             _thread_local.model = _worker_models[idx]
-                    return _thread_local.model.transcribe(chunk_audio, language=lang_arg, verbose=False)
+                    return _thread_local.model.transcribe(
+                        chunk_audio, language=lang_arg, verbose=False,
+                        word_timestamps=use_diar,
+                    )
 
                 # 청크 메타데이터만 사전 준비 (오디오 데이터는 필요 시 슬라이스)
                 chunk_metas = []
@@ -444,6 +475,14 @@ class TranscriberWorker(QObject):
                             "end": seg["end"] + time_offset + trim_offset_sec,
                             "text": seg["text"].strip(),
                         }
+                        # 단어 단위 타임스탬프 전달 (화자 매칭 정확도 향상용)
+                        if seg.get("words"):
+                            adjusted["words"] = [
+                                {"start": w["start"] + time_offset + trim_offset_sec,
+                                 "end": w["end"] + time_offset + trim_offset_sec,
+                                 "word": w.get("word", "")}
+                                for w in seg["words"]
+                            ]
                         if adjusted["text"]:
                             all_segments.append(adjusted)
 
@@ -490,6 +529,7 @@ class TranscriberWorker(QObject):
                     result = model.transcribe(
                         chunk, language=lang_arg, verbose=False,
                         initial_prompt=prompt,
+                        word_timestamps=use_diar,
                     )
                     if self._cancelled:
                         self._log(f"취소됨 — {chunk_idx + 1}/{total_chunks} 청크 완료분 보존")
@@ -519,6 +559,13 @@ class TranscriberWorker(QObject):
                             "end": seg["end"] + time_offset + trim_offset_sec,
                             "text": seg["text"].strip(),
                         }
+                        if seg.get("words"):
+                            adjusted["words"] = [
+                                {"start": w["start"] + time_offset + trim_offset_sec,
+                                 "end": w["end"] + time_offset + trim_offset_sec,
+                                 "word": w.get("word", "")}
+                                for w in seg["words"]
+                            ]
                         if adjusted["text"]:
                             all_segments.append(adjusted)
 
@@ -602,5 +649,10 @@ class TranscriberWorker(QObject):
             if tmp_wav and os.path.exists(tmp_wav):
                 try:
                     os.remove(tmp_wav)
+                except OSError:
+                    pass
+            if tmp_clean_wav and os.path.exists(tmp_clean_wav):
+                try:
+                    os.remove(tmp_clean_wav)
                 except OSError:
                     pass

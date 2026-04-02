@@ -272,15 +272,43 @@ def run_diarization(
     return segments
 
 
+def _find_speaker_at(sorted_dsegs: list[dict], dstarts: list[float],
+                      start: float, end: float) -> str | None:
+    """주어진 시간 구간에서 가장 겹침이 큰 화자를 반환한다."""
+    import bisect
+
+    speaker_overlap: dict[str, float] = defaultdict(float)
+    speaker_earliest: dict[str, float] = {}
+
+    right = bisect.bisect_left(dstarts, end)
+    for i in range(right - 1, -1, -1):
+        dseg = sorted_dsegs[i]
+        if dseg["end"] <= start:
+            break
+        overlap = min(end, dseg["end"]) - max(start, dseg["start"])
+        if overlap > 0:
+            speaker = dseg["speaker"]
+            speaker_overlap[speaker] += overlap
+            if speaker not in speaker_earliest or dseg["start"] < speaker_earliest[speaker]:
+                speaker_earliest[speaker] = dseg["start"]
+
+    if not speaker_overlap:
+        return None
+    return min(
+        speaker_overlap,
+        key=lambda s: (-speaker_overlap[s], speaker_earliest.get(s, float("inf"))),
+    )
+
+
 def assign_speakers(
     diarization_segments: list[dict],
     whisper_segments: list[dict],
 ) -> list[dict]:
-    """가중 투표 방식으로 각 Whisper 세그먼트에 화자를 할당.
+    """단어 단위 화자 매칭으로 각 Whisper 세그먼트에 화자를 할당.
 
-    같은 화자의 여러 diarization 세그먼트 겹침을 합산하고,
-    동률 시 해당 구간에서 가장 이른 start를 가진 화자를 선택.
-    정렬 + 투 포인터로 O((n+m) log n) 시간에 처리.
+    word_timestamps가 있으면 단어별로 화자를 판정한 뒤
+    세그먼트 내 다수결로 최종 화자를 결정한다.
+    word_timestamps가 없으면 세그먼트 단위 가중 투표로 폴백한다.
     """
     import bisect
 
@@ -290,35 +318,26 @@ def assign_speakers(
             for w in whisper_segments
         ]
 
-    # diarization 세그먼트를 시작 시간 기준 정렬
     sorted_dsegs = sorted(diarization_segments, key=lambda d: d["start"])
     dstarts = [d["start"] for d in sorted_dsegs]
 
     result = []
     for wseg in whisper_segments:
-        speaker_overlap: dict[str, float] = defaultdict(float)
-        speaker_earliest: dict[str, float] = {}
-
-        # wseg와 겹칠 수 있는 diarization 세그먼트만 탐색
-        # dseg.start < wseg.end 인 것 중에서, dseg.end > wseg.start 인 것만
-        right = bisect.bisect_left(dstarts, wseg["end"])
-        for i in range(right - 1, -1, -1):
-            dseg = sorted_dsegs[i]
-            if dseg["end"] <= wseg["start"]:
-                break
-            overlap = min(wseg["end"], dseg["end"]) - max(wseg["start"], dseg["start"])
-            if overlap > 0:
-                speaker = dseg["speaker"]
-                speaker_overlap[speaker] += overlap
-                if speaker not in speaker_earliest or dseg["start"] < speaker_earliest[speaker]:
-                    speaker_earliest[speaker] = dseg["start"]
-
-        best_speaker = None
-        if speaker_overlap:
-            best_speaker = min(
-                speaker_overlap,
-                key=lambda s: (-speaker_overlap[s], speaker_earliest.get(s, float("inf"))),
-            )
+        words = wseg.get("words")
+        if words:
+            # 단어 단위 매칭: 각 단어의 시간 구간으로 화자 판정 → 다수결
+            speaker_votes: dict[str, float] = defaultdict(float)
+            for w in words:
+                w_start = w.get("start", wseg["start"])
+                w_end = w.get("end", wseg["end"])
+                sp = _find_speaker_at(sorted_dsegs, dstarts, w_start, w_end)
+                if sp:
+                    # 단어 길이를 가중치로 사용 (긴 단어의 판정이 더 신뢰성 높음)
+                    speaker_votes[sp] += (w_end - w_start)
+            best_speaker = max(speaker_votes, key=speaker_votes.get) if speaker_votes else None
+        else:
+            # 폴백: 세그먼트 단위 가중 투표
+            best_speaker = _find_speaker_at(sorted_dsegs, dstarts, wseg["start"], wseg["end"])
 
         result.append({
             "start": wseg["start"],
