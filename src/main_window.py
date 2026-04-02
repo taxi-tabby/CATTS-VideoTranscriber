@@ -4,7 +4,7 @@ import time
 import webbrowser
 
 from PySide6.QtCore import Qt, QThread, QTimer, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QFont, QIcon, QShortcut, QKeySequence
+from PySide6.QtGui import QAction, QDesktopServices, QFont, QIcon, QShortcut, QKeySequence, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -783,6 +783,7 @@ class MainWindow(QMainWindow):
         self._process_start_time = None
         self._editing = False           # 편집 모드 상태
         self._queue = []                # 변환 대기열: [(path, settings, hf_token), ...]
+        self._live_last_speaker = None  # 라이브 텍스트 화자 그룹화용
 
         version = QApplication.instance().applicationVersion()
         self.setWindowTitle(f"CATTS - Video Transcriber v{version}")
@@ -808,7 +809,11 @@ class MainWindow(QMainWindow):
     # ── 버전 확인 ──
 
     def _on_version_checked(self, latest: int):
-        current = int(QApplication.instance().applicationVersion())
+        try:
+            current = int(QApplication.instance().applicationVersion())
+        except (ValueError, TypeError):
+            self.lbl_version.setToolTip("버전 정보를 읽을 수 없습니다")
+            return
         if latest < 0:
             self.lbl_version.setToolTip("버전 확인 실패 (네트워크 오류)")
             return
@@ -1503,20 +1508,11 @@ class MainWindow(QMainWindow):
     def _on_cancel_transcription(self):
         if self._worker:
             self._worker.cancel()
-            # 스레드 정리 — 취소 플래그 설정 후 스레드가 자체 종료할 때까지 대기
-            # terminate()는 사용하지 않음: ThreadPoolExecutor 워커가 실행 중일 때
-            # GIL 데드락 및 메모리 누수를 유발할 수 있음
-            self._cleanup_thread(wait_ms=5000)
-            self._remove_live_item()
-            self.btn_add.setEnabled(True)
-            self.progress_bar.setVisible(False)
-            self.btn_cancel.setVisible(False)
-            self.lbl_status.setVisible(False)
-            self._elapsed_timer.stop()
-            self._process_start_time = None
-            self._show_detail(False)
-            # 대기열의 다음 항목 시작
-            self._start_next_in_queue()
+            # cancel 플래그만 설정 — 워커가 부분 결과를 finished로 emit하거나,
+            # 결과 없이 종료하면 _on_finished/_on_error에서 정리됨.
+            # UI는 취소 진행 중임을 표시
+            self.btn_cancel.setEnabled(False)
+            self.lbl_status.setText("취소 중... (완료된 부분 저장)")
 
     # ── 변환 시작/대기열 (Feature 2) ──
 
@@ -1531,6 +1527,7 @@ class MainWindow(QMainWindow):
         # 라이브 상태 초기화
         self._live_filename = os.path.basename(video_path)
         self._live_segments = []
+        self._live_last_speaker = None
 
         # 목록 맨 위에 "변환 중" 항목 삽입
         self._live_item = QTreeWidgetItem()
@@ -1612,7 +1609,24 @@ class MainWindow(QMainWindow):
         if self._is_viewing_live():
             self._add_timeline_row(seg)
             self.table_timeline.scrollToBottom()
-            self.txt_fulltext.setPlainText(self._build_full_text(self._live_segments))
+            # O(1) cursor insert — _build_full_text와 동일한 화자 그룹화 포맷
+            cursor = self.txt_fulltext.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            speaker = seg.get("speaker")
+            has_content = self.txt_fulltext.toPlainText() != ""
+            if speaker and speaker != self._live_last_speaker:
+                # 새 화자 → 줄바꿈 후 "화자: 텍스트"
+                if has_content:
+                    cursor.insertText("\n")
+                cursor.insertText(f"{speaker}: {seg['text']}")
+                self._live_last_speaker = speaker
+            elif speaker:
+                # 같은 화자 → 이어붙이기
+                cursor.insertText(f" {seg['text']}")
+            else:
+                # 화자 없음 → 공백 구분
+                separator = " " if has_content else ""
+                cursor.insertText(f"{separator}{seg['text']}")
 
     def _cleanup_thread(self, wait_ms: int = 0):
         """QThread/Worker 안전 정리.
@@ -1632,6 +1646,7 @@ class MainWindow(QMainWindow):
         self._thread = None
 
     def _on_finished(self, result: dict):
+        was_cancelled = self._cancelled_flag()
         self._cleanup_thread()
 
         tid = self.db.add_transcription(
@@ -1668,23 +1683,39 @@ class MainWindow(QMainWindow):
 
         self.progress_bar.setVisible(False)
         self.btn_cancel.setVisible(False)
+        self.btn_cancel.setEnabled(True)
         self.lbl_status.setVisible(False)
         self._elapsed_timer.stop()
         self._process_start_time = None
 
         elapsed_min = result.get("elapsed", 0) / 60
+        seg_count = len(result.get("segments", []))
 
-        # Feature 7: OS 알림
-        self._notify("변환 완료", f"{result['filename']} (소요시간: {elapsed_min:.1f}분)")
-
-        # Feature 2: 대기열 - 다음 항목이 있으면 시작
-        if self._queue:
-            self._start_next_in_queue()
+        if was_cancelled:
+            self._notify("부분 저장", f"{result['filename']} ({seg_count}개 세그먼트 저장됨)")
+            if self._queue:
+                self._start_next_in_queue()
+            else:
+                self._update_queue_display()
+                QMessageBox.information(
+                    self, "부분 저장",
+                    f"취소되었지만 완료된 {seg_count}개 세그먼트가 저장되었습니다."
+                )
         else:
-            self._update_queue_display()
-            QMessageBox.information(
-                self, "완료", f"변환 완료! (소요시간: {elapsed_min:.1f}분)"
-            )
+            self._notify("변환 완료", f"{result['filename']} (소요시간: {elapsed_min:.1f}분)")
+            if self._queue:
+                self._start_next_in_queue()
+            else:
+                self._update_queue_display()
+                QMessageBox.information(
+                    self, "완료", f"변환 완료! (소요시간: {elapsed_min:.1f}분)"
+                )
+
+    def _cancelled_flag(self) -> bool:
+        """워커의 취소 상태를 반환한다."""
+        if self._worker is not None:
+            return self._worker._cancelled
+        return False
 
     def _on_error(self, message: str):
         self._cleanup_thread()
@@ -1694,6 +1725,7 @@ class MainWindow(QMainWindow):
 
         self.progress_bar.setVisible(False)
         self.btn_cancel.setVisible(False)
+        self.btn_cancel.setEnabled(True)
         self.lbl_status.setVisible(False)
         self._elapsed_timer.stop()
         self._process_start_time = None
