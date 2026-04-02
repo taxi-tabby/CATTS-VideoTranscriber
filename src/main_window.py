@@ -783,7 +783,8 @@ class MainWindow(QMainWindow):
         self._editing = False           # 편집 모드 상태
         self._queue = []                # 변환 대기열: [(path, settings, hf_token), ...]
 
-        self.setWindowTitle("CATTS - Video Transcriber")
+        version = QApplication.instance().applicationVersion()
+        self.setWindowTitle(f"CATTS - Video Transcriber v{version}")
         self.setMinimumSize(900, 600)
         self.resize(1100, 700)
         self.setAcceptDrops(True)
@@ -806,7 +807,8 @@ class MainWindow(QMainWindow):
         app_icon = QApplication.instance().windowIcon()
         if not app_icon.isNull():
             self._tray_icon.setIcon(app_icon)
-        self._tray_icon.setToolTip("CATTS - Video Transcriber")
+        v = QApplication.instance().applicationVersion()
+        self._tray_icon.setToolTip(f"CATTS - Video Transcriber v{v}")
         self._tray_icon.show()
 
     def _notify(self, title: str, message: str):

@@ -1,3 +1,4 @@
+import importlib.metadata
 import os
 import sys
 import warnings
@@ -22,6 +23,13 @@ from src.config import get_theme, get_db_dir, get_hf_cache
 from src.database import Database
 from src.main_window import MainWindow
 from src.model_utils import ensure_bundled_model
+
+
+def get_app_version() -> str:
+    try:
+        return importlib.metadata.version("video-transcriber")
+    except importlib.metadata.PackageNotFoundError:
+        return "dev"
 
 
 def get_icon_path() -> str:
@@ -158,7 +166,9 @@ def get_stylesheet(theme: str) -> str:
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("CATTS - Video Transcriber")
+    version = get_app_version()
+    app.setApplicationName(f"CATTS - Video Transcriber v{version}")
+    app.setApplicationVersion(version)
     app.setStyle("Fusion")
     app.setWindowIcon(QIcon(get_icon_path()))
 
