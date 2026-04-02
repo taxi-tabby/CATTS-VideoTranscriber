@@ -24,6 +24,13 @@ from src.main_window import MainWindow
 from src.model_utils import ensure_bundled_model
 
 
+APP_VERSION = 16
+
+
+def get_app_version() -> str:
+    return str(APP_VERSION)
+
+
 def get_icon_path() -> str:
     if getattr(sys, "frozen", False):
         base = sys._MEIPASS
@@ -158,7 +165,9 @@ def get_stylesheet(theme: str) -> str:
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("CATTS - Video Transcriber")
+    version = get_app_version()
+    app.setApplicationName(f"CATTS - Video Transcriber v{version}")
+    app.setApplicationVersion(version)
     app.setStyle("Fusion")
     app.setWindowIcon(QIcon(get_icon_path()))
 

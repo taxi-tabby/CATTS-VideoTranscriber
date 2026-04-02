@@ -4,7 +4,7 @@ import time
 import webbrowser
 
 from PySide6.QtCore import Qt, QThread, QTimer, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QFont, QIcon, QShortcut, QKeySequence
+from PySide6.QtGui import QAction, QDesktopServices, QFont, QIcon, QShortcut, QKeySequence, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -62,6 +62,7 @@ from src.config import (
 from src.database import Database
 from src.model_utils import get_model_display_name
 from src.transcriber import TranscriberWorker
+from src.version_checker import VersionCheckThread, RELEASES_PAGE
 
 
 def format_duration(seconds: float) -> str:
@@ -782,8 +783,10 @@ class MainWindow(QMainWindow):
         self._process_start_time = None
         self._editing = False           # 편집 모드 상태
         self._queue = []                # 변환 대기열: [(path, settings, hf_token), ...]
+        self._live_last_speaker = None  # 라이브 텍스트 화자 그룹화용
 
-        self.setWindowTitle("CATTS - Video Transcriber")
+        version = QApplication.instance().applicationVersion()
+        self.setWindowTitle(f"CATTS - Video Transcriber v{version}")
         self.setMinimumSize(900, 600)
         self.resize(1100, 700)
         self.setAcceptDrops(True)
@@ -793,11 +796,49 @@ class MainWindow(QMainWindow):
         self._setup_shortcuts()
         self._load_list()
 
+        self._version_thread = VersionCheckThread()
+        self._version_thread.finished.connect(self._on_version_checked)
+        self._version_thread.start()
+
         if get_show_startup_guide():
             QTimer.singleShot(0, self._show_startup_guide)
 
     def _show_startup_guide(self):
         StartupGuideDialog(self).exec()
+
+    # ── 버전 확인 ──
+
+    def _on_version_checked(self, latest: int):
+        try:
+            current = int(QApplication.instance().applicationVersion())
+        except (ValueError, TypeError):
+            self.lbl_version.setToolTip("버전 정보를 읽을 수 없습니다")
+            return
+        if latest < 0:
+            self.lbl_version.setToolTip("버전 확인 실패 (네트워크 오류)")
+            return
+        if current >= latest:
+            self.lbl_version.setText(f"v{current} ✓ 최신")
+            self.lbl_version.setStyleSheet("color: #66BB6A; font-size: 11px;")
+            self.lbl_version.setToolTip("최신 버전을 사용 중입니다")
+        else:
+            self.lbl_version.setText(f"v{current} → v{latest} 업데이트")
+            self.lbl_version.setStyleSheet("color: #FFA726; font-size: 11px; font-weight: bold;")
+            self.lbl_version.setToolTip("클릭하면 다운로드 페이지로 이동합니다")
+            self._show_update_dialog(current, latest)
+
+    def _show_update_dialog(self, current: int, latest: int):
+        msg = QMessageBox(self)
+        msg.setWindowTitle("업데이트 안내")
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setText(f"새 버전이 있습니다: v{latest} (현재 v{current})")
+        msg.setInformativeText("다운로드 페이지로 이동하시겠습니까?")
+        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        msg.setDefaultButton(QMessageBox.StandardButton.Yes)
+        msg.button(QMessageBox.StandardButton.Yes).setText("다운로드 페이지 열기")
+        msg.button(QMessageBox.StandardButton.No).setText("나중에")
+        if msg.exec() == QMessageBox.StandardButton.Yes:
+            QDesktopServices.openUrl(QUrl(RELEASES_PAGE))
 
     # ── 시스템 트레이 아이콘 (Feature 7) ──
 
@@ -806,7 +847,8 @@ class MainWindow(QMainWindow):
         app_icon = QApplication.instance().windowIcon()
         if not app_icon.isNull():
             self._tray_icon.setIcon(app_icon)
-        self._tray_icon.setToolTip("CATTS - Video Transcriber")
+        v = QApplication.instance().applicationVersion()
+        self._tray_icon.setToolTip(f"CATTS - Video Transcriber v{v}")
         self._tray_icon.show()
 
     def _notify(self, title: str, message: str):
@@ -1025,6 +1067,15 @@ class MainWindow(QMainWindow):
         self.lbl_status = QLabel("")
         self.lbl_status.setVisible(False)
         bottom_layout.addWidget(self.lbl_status)
+
+        bottom_layout.addStretch()
+
+        self.lbl_version = QLabel(f"v{QApplication.instance().applicationVersion()}")
+        self.lbl_version.setStyleSheet("color: #8EA4C0; font-size: 11px;")
+        self.lbl_version.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.lbl_version.setToolTip("버전 정보 확인 중...")
+        self.lbl_version.mousePressEvent = lambda _: QDesktopServices.openUrl(QUrl(RELEASES_PAGE))
+        bottom_layout.addWidget(self.lbl_version)
 
         layout.addWidget(bottom)
 
@@ -1457,20 +1508,11 @@ class MainWindow(QMainWindow):
     def _on_cancel_transcription(self):
         if self._worker:
             self._worker.cancel()
-            # 스레드 정리 — 취소 플래그 설정 후 스레드가 자체 종료할 때까지 대기
-            # terminate()는 사용하지 않음: ThreadPoolExecutor 워커가 실행 중일 때
-            # GIL 데드락 및 메모리 누수를 유발할 수 있음
-            self._cleanup_thread(wait_ms=5000)
-            self._remove_live_item()
-            self.btn_add.setEnabled(True)
-            self.progress_bar.setVisible(False)
-            self.btn_cancel.setVisible(False)
-            self.lbl_status.setVisible(False)
-            self._elapsed_timer.stop()
-            self._process_start_time = None
-            self._show_detail(False)
-            # 대기열의 다음 항목 시작
-            self._start_next_in_queue()
+            # cancel 플래그만 설정 — 워커가 부분 결과를 finished로 emit하거나,
+            # 결과 없이 종료하면 _on_finished/_on_error에서 정리됨.
+            # UI는 취소 진행 중임을 표시
+            self.btn_cancel.setEnabled(False)
+            self.lbl_status.setText("취소 중... (완료된 부분 저장)")
 
     # ── 변환 시작/대기열 (Feature 2) ──
 
@@ -1485,6 +1527,7 @@ class MainWindow(QMainWindow):
         # 라이브 상태 초기화
         self._live_filename = os.path.basename(video_path)
         self._live_segments = []
+        self._live_last_speaker = None
 
         # 목록 맨 위에 "변환 중" 항목 삽입
         self._live_item = QTreeWidgetItem()
@@ -1566,7 +1609,24 @@ class MainWindow(QMainWindow):
         if self._is_viewing_live():
             self._add_timeline_row(seg)
             self.table_timeline.scrollToBottom()
-            self.txt_fulltext.setPlainText(self._build_full_text(self._live_segments))
+            # O(1) cursor insert — _build_full_text와 동일한 화자 그룹화 포맷
+            cursor = self.txt_fulltext.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            speaker = seg.get("speaker")
+            has_content = self.txt_fulltext.toPlainText() != ""
+            if speaker and speaker != self._live_last_speaker:
+                # 새 화자 → 줄바꿈 후 "화자: 텍스트"
+                if has_content:
+                    cursor.insertText("\n")
+                cursor.insertText(f"{speaker}: {seg['text']}")
+                self._live_last_speaker = speaker
+            elif speaker:
+                # 같은 화자 → 이어붙이기
+                cursor.insertText(f" {seg['text']}")
+            else:
+                # 화자 없음 → 공백 구분
+                separator = " " if has_content else ""
+                cursor.insertText(f"{separator}{seg['text']}")
 
     def _cleanup_thread(self, wait_ms: int = 0):
         """QThread/Worker 안전 정리.
@@ -1586,6 +1646,7 @@ class MainWindow(QMainWindow):
         self._thread = None
 
     def _on_finished(self, result: dict):
+        was_cancelled = self._cancelled_flag()
         self._cleanup_thread()
 
         tid = self.db.add_transcription(
@@ -1622,23 +1683,39 @@ class MainWindow(QMainWindow):
 
         self.progress_bar.setVisible(False)
         self.btn_cancel.setVisible(False)
+        self.btn_cancel.setEnabled(True)
         self.lbl_status.setVisible(False)
         self._elapsed_timer.stop()
         self._process_start_time = None
 
         elapsed_min = result.get("elapsed", 0) / 60
+        seg_count = len(result.get("segments", []))
 
-        # Feature 7: OS 알림
-        self._notify("변환 완료", f"{result['filename']} (소요시간: {elapsed_min:.1f}분)")
-
-        # Feature 2: 대기열 - 다음 항목이 있으면 시작
-        if self._queue:
-            self._start_next_in_queue()
+        if was_cancelled:
+            self._notify("부분 저장", f"{result['filename']} ({seg_count}개 세그먼트 저장됨)")
+            if self._queue:
+                self._start_next_in_queue()
+            else:
+                self._update_queue_display()
+                QMessageBox.information(
+                    self, "부분 저장",
+                    f"취소되었지만 완료된 {seg_count}개 세그먼트가 저장되었습니다."
+                )
         else:
-            self._update_queue_display()
-            QMessageBox.information(
-                self, "완료", f"변환 완료! (소요시간: {elapsed_min:.1f}분)"
-            )
+            self._notify("변환 완료", f"{result['filename']} (소요시간: {elapsed_min:.1f}분)")
+            if self._queue:
+                self._start_next_in_queue()
+            else:
+                self._update_queue_display()
+                QMessageBox.information(
+                    self, "완료", f"변환 완료! (소요시간: {elapsed_min:.1f}분)"
+                )
+
+    def _cancelled_flag(self) -> bool:
+        """워커의 취소 상태를 반환한다."""
+        if self._worker is not None:
+            return self._worker._cancelled
+        return False
 
     def _on_error(self, message: str):
         self._cleanup_thread()
@@ -1648,6 +1725,7 @@ class MainWindow(QMainWindow):
 
         self.progress_bar.setVisible(False)
         self.btn_cancel.setVisible(False)
+        self.btn_cancel.setEnabled(True)
         self.lbl_status.setVisible(False)
         self._elapsed_timer.stop()
         self._process_start_time = None

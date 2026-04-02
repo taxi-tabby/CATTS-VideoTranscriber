@@ -44,6 +44,16 @@ def load_wav_as_numpy(audio_path: str) -> np.ndarray:
     return np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
 
 
+def save_numpy_as_wav(audio: np.ndarray, wav_path: str, sample_rate: int = 16000) -> None:
+    """float32 numpy 배열을 16-bit PCM WAV로 저장한다."""
+    pcm = np.clip(audio * 32768.0, -32768, 32767).astype(np.int16)
+    with wave.open(wav_path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm.tobytes())
+
+
 def get_video_duration(audio: np.ndarray) -> float:
     return len(audio) / 16000.0
 
@@ -103,10 +113,11 @@ def _cap_workers_by_memory(requested_workers: int, model_mb: int, log_fn) -> int
             log_fn(f"메모리 측정 불가 — 워커 수 제한: {requested_workers} → {capped}")
         return capped
 
-    # 모델 메모리 (디스크 크기의 ~1.5배가 실제 메모리 사용량)
-    model_mem_mb = int(model_mb * 1.5)
-    # 시스템 여유분 2GB 확보
-    reserve_mb = 2048
+    # 모델 메모리: 디스크 크기의 ~2.5배가 추론 시 실제 메모리 사용량
+    # (모델 가중치 + 디코더 상태 + 추론 중 임시 텐서)
+    model_mem_mb = int(model_mb * 2.5)
+    # 시스템 여유분 3GB 확보 (OS, Qt GUI, 기타 프로세스)
+    reserve_mb = 3072
     usable_mb = max(0, avail_mb - reserve_mb)
     max_copies = max(1, usable_mb // model_mem_mb)
     capped = min(requested_workers, max_copies)
@@ -166,6 +177,7 @@ class TranscriberWorker(QObject):
 
     def run(self):
         tmp_wav = None
+        tmp_clean_wav = None
         try:
             ffmpeg = get_ffmpeg_exe()
             use_diar = self.use_diarization and self.hf_token
@@ -181,6 +193,7 @@ class TranscriberWorker(QObject):
             extract_audio(self.video_path, tmp_wav, ffmpeg)
             self._log("음성 추출 완료 (WAV 16kHz mono)")
             if self._cancelled:
+                self.error.emit("사용자가 변환을 취소했습니다.")
                 return
 
             # Step 2: Load audio + preprocess
@@ -190,6 +203,7 @@ class TranscriberWorker(QObject):
             duration = get_video_duration(audio)  # 원본 영상 길이 (결과용)
             self._log(f"오디오 길이: {duration:.1f}초")
             if self._cancelled:
+                self.error.emit("사용자가 변환을 취소했습니다.")
                 return
 
             from src.audio_preprocess import preprocess as preprocess_audio
@@ -199,14 +213,26 @@ class TranscriberWorker(QObject):
             audio_duration = get_video_duration(audio)  # 트리밍 후 길이 (진행률용)
             self._log(f"전처리 완료 (트리밍 후: {audio_duration:.1f}초)")
             if self._cancelled:
+                self.error.emit("사용자가 변환을 취소했습니다.")
                 return
 
             # Step 2.5: Speaker diarization (optional)
+            # 전처리된 오디오를 WAV로 저장하여 화자 분석에 전달
+            # (노이즈 제거 후 오디오로 분석해야 화자 embedding 정확도 향상)
             diarization_segments = None
+            tmp_clean_wav = None
             if use_diar:
                 self.progress.emit(8, f"[3/{step_total}] 화자 분석 중...")
                 self._log("화자 분리 모델 로드 중...")
                 from src.diarizer import run_diarization
+
+                # 전처리된 오디오를 임시 WAV로 저장
+                tmp_clean_wav = os.path.join(
+                    tempfile.gettempdir(),
+                    f"vt_{os.path.basename(self.video_path)}_clean.wav",
+                )
+                save_numpy_as_wav(audio, tmp_clean_wav)
+                self._log("전처리된 오디오를 화자 분석에 사용")
 
                 # diarizer의 0~100을 전체 진행률 8~18에 매핑
                 def _diar_progress(pct: int, msg: str):
@@ -214,7 +240,7 @@ class TranscriberWorker(QObject):
                     self.progress.emit(mapped, f"[3/{step_total}] {msg}")
 
                 diarization_segments = run_diarization(
-                    tmp_wav, self.hf_token,
+                    tmp_clean_wav, self.hf_token,
                     num_speakers=self.num_speakers,
                     min_speakers=self.min_speakers,
                     max_speakers=self.max_speakers,
@@ -223,9 +249,16 @@ class TranscriberWorker(QObject):
                     log_callback=self._log,
                     num_threads=self.diar_threads,
                 )
+                # diarization 타임스탬프에 트리밍 오프셋 적용
+                # (전처리된 오디오 기준 → 원본 기준으로 보정)
+                if trim_offset_sec > 0:
+                    for dseg in diarization_segments:
+                        dseg["start"] += trim_offset_sec
+                        dseg["end"] += trim_offset_sec
                 self._log(f"화자 분석 완료: {len(diarization_segments)}개 구간 검출")
                 self.progress.emit(18, "화자 분석 완료")
                 if self._cancelled:
+                    self.error.emit("사용자가 변환을 취소했습니다.")
                     return
 
             # Step 3 (or 4 with diar): Load Whisper model
@@ -237,6 +270,7 @@ class TranscriberWorker(QObject):
             model = whisper.load_model(self.model_name, download_root=get_whisper_cache_dir())
             self._log("Whisper 모델 로드 완료")
             if self._cancelled:
+                self.error.emit("사용자가 변환을 취소했습니다.")
                 return
 
             # Step 4: Transcribe in chunks
@@ -268,6 +302,7 @@ class TranscriberWorker(QObject):
             if effective_workers > 1:
                 # ── 멀티스레드: 청크 병렬 처리 (CPU 전용) ──
                 self._log(f"텍스트 변환 시작 (총 {total_chunks}개 청크, 언어: {self.language}, 워커: {effective_workers})")
+                self._log("멀티스레드 모드: 청크 간 문맥 연결 없이 독립 변환 (속도↑, 경계부 정확도↓)")
 
                 # 워커별 독립 모델 복사본 생성 (PyTorch 모델은 thread-safe하지 않음)
                 _thread_local = threading.local()
@@ -299,45 +334,65 @@ class TranscriberWorker(QObject):
                         with _model_lock:
                             idx = _model_idx[0]
                             if idx >= len(_worker_models):
-                                idx = len(_worker_models) - 1
-                                self._log(f"[경고] 모델 인덱스 범위 초과 — 마지막 모델로 폴백 (idx→{idx})")
-                            else:
-                                _model_idx[0] += 1
+                                raise RuntimeError(
+                                    f"워커 스레드가 모델 수({len(_worker_models)})를 초과했습니다. "
+                                    f"동일 모델을 공유하면 결과가 손상되므로 중단합니다."
+                                )
+                            _model_idx[0] += 1
                             _thread_local.model = _worker_models[idx]
-                    return _thread_local.model.transcribe(chunk_audio, language=lang_arg, verbose=False)
+                    return _thread_local.model.transcribe(
+                        chunk_audio, language=lang_arg, verbose=False,
+                        word_timestamps=use_diar,
+                    )
 
-                # 청크 오디오 데이터 준비 (numpy 슬라이스 = view, 메모리 복사 없음)
-                chunks_audio = []
+                # 청크 메타데이터만 사전 준비 (오디오 데이터는 필요 시 슬라이스)
                 chunk_metas = []
                 for chunk_start in range(0, total_samples, CHUNK_SAMPLES):
                     chunk_end = min(chunk_start + CHUNK_SAMPLES, total_samples)
-                    chunks_audio.append(audio[chunk_start:chunk_end].copy())
                     chunk_metas.append((chunk_start, chunk_end))
-                # 원본 오디오 배열 해제 (청크 복사본만 유지)
-                del audio
-                gc.collect()
 
                 results_buf = {}
                 completed = 0
                 failed_chunks = []
 
+                # 메모리 안전 임계값: 가용 메모리가 이 이하로 떨어지면 submit 보류
+                _MEM_SAFETY_MB = 1024
+
                 try:
                     with ThreadPoolExecutor(max_workers=effective_workers) as pool:
-                        # 초기 제출
                         pending = {}  # future -> (chunk_idx, retry_count)
-                        for idx, chunk_audio in enumerate(chunks_audio):
+                        next_submit = 0  # 다음 submit할 청크 인덱스
+                        max_pending = effective_workers * 2  # 동시 pending 상한
+
+                        def _submit_chunk(idx):
+                            cs, ce = chunk_metas[idx]
+                            chunk_audio = audio[cs:ce].copy()
                             f = pool.submit(_transcribe_chunk, chunk_audio)
                             pending[f] = (idx, 0)
 
+                        # 초기 제출: 워커 수 × 2개만 먼저 submit
+                        while next_submit < total_chunks and len(pending) < max_pending:
+                            _submit_chunk(next_submit)
+                            next_submit += 1
+
                         while pending:
                             if self._cancelled:
+                                # 취소: 대기 중인 future만 취소, 이미 완료된 결과는 보존
                                 for f in pending:
                                     f.cancel()
-                                return
+                                # 이미 완료된 future의 결과 수거
+                                for f, (cidx, _) in list(pending.items()):
+                                    if f.done() and not f.cancelled():
+                                        try:
+                                            results_buf[cidx] = f.result()
+                                            completed += 1
+                                        except Exception:
+                                            pass
+                                self._log(f"취소됨 — {completed}/{total_chunks} 청크 완료분 보존")
+                                break
 
                             done_futures = [f for f in pending if f.done()]
                             if not done_futures:
-                                # 아직 완료된 게 없으면 짧게 대기 후 취소 확인
                                 time.sleep(0.3)
                                 continue
 
@@ -350,7 +405,9 @@ class TranscriberWorker(QObject):
                                     if retry_count < MAX_RETRIES:
                                         retry_count += 1
                                         self._log(f"청크 {chunk_idx + 1}/{total_chunks} 실패 (재시도 {retry_count}/{MAX_RETRIES}): {chunk_err}")
-                                        f = pool.submit(_transcribe_chunk, chunks_audio[chunk_idx])
+                                        cs, ce = chunk_metas[chunk_idx]
+                                        chunk_audio = audio[cs:ce].copy()
+                                        f = pool.submit(_transcribe_chunk, chunk_audio)
                                         pending[f] = (chunk_idx, retry_count)
                                         continue
                                     else:
@@ -360,6 +417,10 @@ class TranscriberWorker(QObject):
 
                                 results_buf[chunk_idx] = result
                                 completed += 1
+
+                                # 주기적 GC: 임시 텐서 해제 (매번은 오버헤드)
+                                if completed % 5 == 0:
+                                    gc.collect()
 
                                 pct = transcribe_start + int((completed / total_chunks) * (95 - transcribe_start))
                                 pct = min(pct, 95)
@@ -372,24 +433,31 @@ class TranscriberWorker(QObject):
                                     eta_str = ""
                                 self.progress.emit(pct, f"[{transcribe_step}/{step_total}] 변환 중... {completed}/{total_chunks} 청크{eta_str}")
                                 self._log(f"청크 {chunk_idx + 1}/{total_chunks} 완료")
+
+                            # 슬라이딩 윈도우: 빈 슬롯이 생기면 다음 청크 submit
+                            while next_submit < total_chunks and len(pending) < max_pending:
+                                avail = _get_available_memory_mb()
+                                if avail > 0 and avail < _MEM_SAFETY_MB:
+                                    self._log(f"메모리 부족 ({avail}MB) — 추가 submit 보류")
+                                    break
+                                _submit_chunk(next_submit)
+                                next_submit += 1
                 finally:
-                    # 취소/예외 여부와 무관하게 torch 스레드 수 복원
                     _torch.set_num_threads(_orig_threads)
 
-                # 워커 모델 메모리 해제 (pool 종료 후 thread-local은 접근 불가하므로 리스트로 정리)
+                # 원본 오디오 배열 해제
+                del audio
+                # 워커 모델 메모리 해제
                 del _worker_models
                 del _thread_local
-                del chunks_audio
                 gc.collect()
                 self._log("워커 모델 메모리 해제 완료")
 
                 if failed_chunks:
                     self._log(f"⚠ {len(failed_chunks)}개 청크 변환 실패 (청크 번호: {failed_chunks})")
 
-                # 순서대로 결과 처리 (pool 종료 후)
+                # 순서대로 결과 처리 (pool 종료 후 — 취소 시에도 완료분 처리)
                 for idx in range(total_chunks):
-                    if self._cancelled:
-                        return
                     res = results_buf.get(idx)
                     if res is None:
                         continue
@@ -407,6 +475,14 @@ class TranscriberWorker(QObject):
                             "end": seg["end"] + time_offset + trim_offset_sec,
                             "text": seg["text"].strip(),
                         }
+                        # 단어 단위 타임스탬프 전달 (화자 매칭 정확도 향상용)
+                        if seg.get("words"):
+                            adjusted["words"] = [
+                                {"start": w["start"] + time_offset + trim_offset_sec,
+                                 "end": w["end"] + time_offset + trim_offset_sec,
+                                 "word": w.get("word", "")}
+                                for w in seg["words"]
+                            ]
                         if adjusted["text"]:
                             all_segments.append(adjusted)
 
@@ -424,7 +500,8 @@ class TranscriberWorker(QObject):
 
                 for chunk_idx, chunk_start in enumerate(range(0, total_samples, CHUNK_SAMPLES)):
                     if self._cancelled:
-                        return
+                        self._log(f"취소됨 — {chunk_idx}/{total_chunks} 청크 완료분 보존")
+                        break
 
                     chunk_end = min(chunk_start + CHUNK_SAMPLES, total_samples)
                     chunk = audio[chunk_start:chunk_end]
@@ -452,9 +529,23 @@ class TranscriberWorker(QObject):
                     result = model.transcribe(
                         chunk, language=lang_arg, verbose=False,
                         initial_prompt=prompt,
+                        word_timestamps=use_diar,
                     )
                     if self._cancelled:
-                        return
+                        self._log(f"취소됨 — {chunk_idx + 1}/{total_chunks} 청크 완료분 보존")
+                        # 현재 청크 결과는 저장하고 루프 탈출
+                        chunk_text = result.get("text", "").strip()
+                        if chunk_text:
+                            full_text_parts.append(chunk_text)
+                        for seg in result.get("segments", []):
+                            adjusted = {
+                                "start": seg["start"] + time_offset + trim_offset_sec,
+                                "end": seg["end"] + time_offset + trim_offset_sec,
+                                "text": seg["text"].strip(),
+                            }
+                            if adjusted["text"]:
+                                all_segments.append(adjusted)
+                        break
 
                     chunk_text = result.get("text", "").strip()
                     if chunk_text:
@@ -468,6 +559,13 @@ class TranscriberWorker(QObject):
                             "end": seg["end"] + time_offset + trim_offset_sec,
                             "text": seg["text"].strip(),
                         }
+                        if seg.get("words"):
+                            adjusted["words"] = [
+                                {"start": w["start"] + time_offset + trim_offset_sec,
+                                 "end": w["end"] + time_offset + trim_offset_sec,
+                                 "word": w.get("word", "")}
+                                for w in seg["words"]
+                            ]
                         if adjusted["text"]:
                             all_segments.append(adjusted)
 
@@ -492,11 +590,35 @@ class TranscriberWorker(QObject):
                 all_segments = map_speaker_labels(all_segments)
 
             elapsed = time.time() - start_time
-            self._log(f"변환 완료! 총 {len(all_segments)}개 세그먼트, 소요시간: {elapsed:.1f}초")
 
-            if self._cancelled:
+            if self._cancelled and all_segments:
+                # 취소되었지만 완료된 결과가 있으면 부분 결과로 저장
+                if diarization_segments:
+                    from src.diarizer import map_speaker_labels
+                    all_segments = map_speaker_labels(all_segments)
+                self._log(f"취소됨 — 부분 결과 저장: {len(all_segments)}개 세그먼트, 소요시간: {elapsed:.1f}초")
+                self.finished.emit({
+                    "filename": os.path.basename(self.video_path),
+                    "filepath": self.video_path,
+                    "duration": duration,
+                    "full_text": " ".join(full_text_parts),
+                    "segments": all_segments,
+                    "elapsed": elapsed,
+                    "model_name": self.model_name,
+                    "language": self.language,
+                })
                 return
 
+            if self._cancelled:
+                self._log("취소됨 — 저장할 결과 없음")
+                self.error.emit("사용자가 변환을 취소했습니다.")
+                return
+
+            if diarization_segments:
+                from src.diarizer import map_speaker_labels
+                all_segments = map_speaker_labels(all_segments)
+
+            self._log(f"변환 완료! 총 {len(all_segments)}개 세그먼트, 소요시간: {elapsed:.1f}초")
             self.progress.emit(100, "완료!")
 
             self.finished.emit({
@@ -527,5 +649,10 @@ class TranscriberWorker(QObject):
             if tmp_wav and os.path.exists(tmp_wav):
                 try:
                     os.remove(tmp_wav)
+                except OSError:
+                    pass
+            if tmp_clean_wav and os.path.exists(tmp_clean_wav):
+                try:
+                    os.remove(tmp_clean_wav)
                 except OSError:
                     pass
