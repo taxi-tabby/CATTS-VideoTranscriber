@@ -1731,10 +1731,26 @@ class MainWindow(QMainWindow):
         self._process_start_time = None
         self._show_detail(False)
 
+        # 사용자 취소 메시지는 보고 대상이 아님
+        if "취소" in message:
+            self._notify("변환 취소", message)
+            self._start_next_in_queue()
+            return
+
         # Feature 7: OS 알림
         self._notify("변환 오류", f"변환 중 오류가 발생했습니다.")
 
-        QMessageBox.critical(self, "오류", f"변환 중 오류 발생:\n{message}")
+        # 오류 보고 다이얼로그
+        log_text = self.txt_log.toPlainText()
+        reply = QMessageBox.critical(
+            self, "오류",
+            f"변환 중 오류 발생:\n{message}\n\n"
+            "이 오류를 개발자에게 보고하시겠습니까?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            from src.crash_reporter import _show_crash_dialog
+            _show_crash_dialog(message, processing_log=log_text, parent=self)
 
         # Feature 2: 대기열 - 오류 시에도 다음 항목 시작
         self._start_next_in_queue()
