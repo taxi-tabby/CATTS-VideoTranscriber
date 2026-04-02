@@ -62,6 +62,7 @@ from src.config import (
 from src.database import Database
 from src.model_utils import get_model_display_name
 from src.transcriber import TranscriberWorker
+from src.version_checker import VersionCheckThread, RELEASES_PAGE
 
 
 def format_duration(seconds: float) -> str:
@@ -794,11 +795,45 @@ class MainWindow(QMainWindow):
         self._setup_shortcuts()
         self._load_list()
 
+        self._version_thread = VersionCheckThread()
+        self._version_thread.finished.connect(self._on_version_checked)
+        self._version_thread.start()
+
         if get_show_startup_guide():
             QTimer.singleShot(0, self._show_startup_guide)
 
     def _show_startup_guide(self):
         StartupGuideDialog(self).exec()
+
+    # ── 버전 확인 ──
+
+    def _on_version_checked(self, latest: int):
+        current = int(QApplication.instance().applicationVersion())
+        if latest < 0:
+            self.lbl_version.setToolTip("버전 확인 실패 (네트워크 오류)")
+            return
+        if current >= latest:
+            self.lbl_version.setText(f"v{current} ✓ 최신")
+            self.lbl_version.setStyleSheet("color: #66BB6A; font-size: 11px;")
+            self.lbl_version.setToolTip("최신 버전을 사용 중입니다")
+        else:
+            self.lbl_version.setText(f"v{current} → v{latest} 업데이트")
+            self.lbl_version.setStyleSheet("color: #FFA726; font-size: 11px; font-weight: bold;")
+            self.lbl_version.setToolTip("클릭하면 다운로드 페이지로 이동합니다")
+            self._show_update_dialog(current, latest)
+
+    def _show_update_dialog(self, current: int, latest: int):
+        msg = QMessageBox(self)
+        msg.setWindowTitle("업데이트 안내")
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setText(f"새 버전이 있습니다: v{latest} (현재 v{current})")
+        msg.setInformativeText("다운로드 페이지로 이동하시겠습니까?")
+        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        msg.setDefaultButton(QMessageBox.StandardButton.Yes)
+        msg.button(QMessageBox.StandardButton.Yes).setText("다운로드 페이지 열기")
+        msg.button(QMessageBox.StandardButton.No).setText("나중에")
+        if msg.exec() == QMessageBox.StandardButton.Yes:
+            QDesktopServices.openUrl(QUrl(RELEASES_PAGE))
 
     # ── 시스템 트레이 아이콘 (Feature 7) ──
 
@@ -1027,6 +1062,15 @@ class MainWindow(QMainWindow):
         self.lbl_status = QLabel("")
         self.lbl_status.setVisible(False)
         bottom_layout.addWidget(self.lbl_status)
+
+        bottom_layout.addStretch()
+
+        self.lbl_version = QLabel(f"v{QApplication.instance().applicationVersion()}")
+        self.lbl_version.setStyleSheet("color: #8EA4C0; font-size: 11px;")
+        self.lbl_version.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.lbl_version.setToolTip("버전 정보 확인 중...")
+        self.lbl_version.mousePressEvent = lambda _: QDesktopServices.openUrl(QUrl(RELEASES_PAGE))
+        bottom_layout.addWidget(self.lbl_version)
 
         layout.addWidget(bottom)
 

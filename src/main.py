@@ -1,4 +1,3 @@
-import importlib.metadata
 import os
 import sys
 import warnings
@@ -25,11 +24,11 @@ from src.main_window import MainWindow
 from src.model_utils import ensure_bundled_model
 
 
+APP_VERSION = 16
+
+
 def get_app_version() -> str:
-    try:
-        return importlib.metadata.version("video-transcriber")
-    except importlib.metadata.PackageNotFoundError:
-        return "dev"
+    return str(APP_VERSION)
 
 
 def get_icon_path() -> str:
