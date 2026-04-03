@@ -2,6 +2,7 @@
 
 음성 인식 정확도를 높이기 위해 오디오 신호를 정리한다.
 적용 순서:
+  0. (noisy 프로파일) Demucs 보컬 분리 — 배경음악/효과음 제거
   1. high-pass filter  — 저주파 럼블/험 노이즈 제거
   2. noise reduction   — 배경 소음 제거 (spectral gating)
   3. Silero VAD        — 비음성 구간 무음 처리 (환각 방지)
@@ -168,16 +169,85 @@ def normalize_peak(audio: np.ndarray, target_peak: float = 0.95) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# 0. Demucs 보컬 분리 (noisy 프로파일 전용)
+# ---------------------------------------------------------------------------
+
+def separate_vocals(audio: np.ndarray, log_callback=None) -> np.ndarray:
+    """Demucs로 오디오에서 보컬(음성)만 분리한다.
+
+    배경음악, 효과음, 노래 반주를 제거하고 순수한 음성만 추출한다.
+    입력/출력 모두 16kHz mono numpy 배열이다.
+    """
+    import torch
+    import gc
+    import torchaudio.functional as F
+    from demucs.pretrained import get_model
+    from demucs.apply import apply_model
+
+    if log_callback:
+        log_callback("Demucs 모델 로드 중 (htdemucs)...")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = get_model("htdemucs")
+    model.to(device)
+
+    # 16kHz mono → 44100Hz stereo (Demucs 입력 형식)
+    audio_tensor = torch.from_numpy(audio).float().unsqueeze(0)  # (1, samples)
+    audio_44k = F.resample(audio_tensor, SAMPLE_RATE, model.samplerate)
+    # mono → stereo
+    audio_stereo = audio_44k.expand(2, -1)  # (2, samples)
+
+    if log_callback:
+        log_callback("보컬 분리 처리 중...")
+
+    # apply_model expects (batch, channels, samples)
+    mix = audio_stereo.unsqueeze(0).to(device)  # (1, 2, samples)
+    with torch.inference_mode():
+        sources = apply_model(model, mix, device=device)
+    # sources shape: (1, n_sources, 2, samples)
+    # model.sources = ['drums', 'bass', 'other', 'vocals']
+    vocal_idx = model.sources.index("vocals")
+    vocals = sources[0, vocal_idx].cpu()  # (2, samples)
+
+    # stereo → mono, 44100Hz → 16kHz
+    vocals_mono = vocals.mean(dim=0, keepdim=True)  # (1, samples)
+    vocals_16k = F.resample(vocals_mono, model.samplerate, SAMPLE_RATE)
+    result = vocals_16k.squeeze().numpy().astype(np.float32)
+
+    if log_callback:
+        log_callback("보컬 분리 완료")
+
+    # 메모리 해제
+    del model, sources, vocals, mix, audio_tensor, audio_44k, audio_stereo
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # 통합 파이프라인
 # ---------------------------------------------------------------------------
 
-def preprocess(audio: np.ndarray) -> tuple[np.ndarray, int]:
+def preprocess(
+    audio: np.ndarray,
+    use_vocal_separation: bool = False,
+    log_callback=None,
+) -> tuple[np.ndarray, int]:
     """전처리 파이프라인.
+
+    Args:
+        audio: 16kHz mono numpy 배열
+        use_vocal_separation: True면 Demucs 보컬 분리를 먼저 수행한다
+        log_callback: (message: str) 형태. 상세 로그 출력.
 
     Returns:
         (preprocessed_audio, trim_offset_samples)
         trim_offset_samples: 트리밍으로 제거된 앞부분 샘플 수 (타이밍 보정용)
     """
+    if use_vocal_separation:
+        audio = separate_vocals(audio, log_callback=log_callback)
     audio = highpass_filter(audio)
     audio = reduce_noise(audio)
     audio = suppress_non_speech(audio)

@@ -211,8 +211,16 @@ class TranscriberWorker(QObject):
                 return
 
             from src.audio_preprocess import preprocess as preprocess_audio
-            self._log("오디오 전처리 중 (노이즈 제거, 트리밍)...")
-            audio, trim_offset_samples = preprocess_audio(audio)
+            use_vocal_sep = self.diar_profile == "noisy"
+            if use_vocal_sep:
+                self._log("오디오 전처리 중 (보컬 분리, 노이즈 제거, 트리밍)...")
+            else:
+                self._log("오디오 전처리 중 (노이즈 제거, 트리밍)...")
+            audio, trim_offset_samples = preprocess_audio(
+                audio,
+                use_vocal_separation=use_vocal_sep,
+                log_callback=self._log,
+            )
             trim_offset_sec = trim_offset_samples / SAMPLE_RATE
             audio_duration = get_video_duration(audio)  # 트리밍 후 길이 (진행률용)
             self._log(f"전처리 완료 (트리밍 후: {audio_duration:.1f}초)")

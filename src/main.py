@@ -218,6 +218,7 @@ def selftest():
         ("torch", lambda m: m.__version__),
         ("PySide6.QtWidgets", lambda m: "OK"),
         ("soundfile", lambda m: "OK"),
+        ("demucs", lambda m: getattr(m, '__version__', 'OK')),
     ]
 
     for mod_name, get_info in test_modules:
