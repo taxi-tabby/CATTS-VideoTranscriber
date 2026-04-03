@@ -1775,7 +1775,11 @@ class MainWindow(QMainWindow):
         self._worker.finished.connect(self._on_finished)
         self._worker.error.connect(self._on_error)
 
-        # QThread 안전 정리: thread.finished(이벤트 루프 종료 후)에서 deleteLater
+        # QThread 안전 정리: thread.finished(이벤트 루프 종료 후)에서
+        # Python 참조 해제 + C++ deleteLater.
+        # finished 시그널은 run()의 finally 블록까지 완료된 후 발생하므로
+        # 워커가 아직 실행 중일 때 참조가 해제되는 race condition을 방지한다.
+        self._thread.finished.connect(self._release_thread_refs)
         self._thread.finished.connect(self._worker.deleteLater)
         self._thread.finished.connect(self._thread.deleteLater)
 
@@ -1845,22 +1849,30 @@ class MainWindow(QMainWindow):
                 separator = " " if has_content else ""
                 cursor.insertText(f"{separator}{seg['text']}")
 
+    def _release_thread_refs(self):
+        """QThread.finished 시그널에 의해 호출 — 스레드 완전 종료 후 참조 해제."""
+        self._worker = None
+        self._thread = None
+
     def _cleanup_thread(self, wait_ms: int = 0):
         """QThread/Worker 안전 정리.
 
-        quit()으로 이벤트 루프 종료를 요청하고 참조를 해제한다.
-        실제 C++ 객체 소멸은 thread.finished → deleteLater 체인에 의해
-        Qt 이벤트 루프가 안전한 시점에 처리된다.
+        quit()으로 이벤트 루프 종료를 요청한다.
+        wait_ms > 0이면 동기 대기 후 참조를 즉시 해제하고,
+        그렇지 않으면 thread.finished 시그널에서 비동기로 해제한다.
 
         Args:
             wait_ms: >0이면 스레드 종료까지 동기 대기 (취소/종료 시 사용).
+                     0이면 비동기 — thread.finished에서 참조 해제.
         """
         if self._thread is not None:
             self._thread.quit()
             if wait_ms > 0:
-                self._thread.wait(wait_ms)
-        self._worker = None
-        self._thread = None
+                if not self._thread.wait(wait_ms):
+                    print(f"[warning] 워커 스레드가 {wait_ms}ms 내에 종료되지 않음")
+                # 동기 대기 완료 — 즉시 해제 안전
+                self._worker = None
+                self._thread = None
 
     def _on_finished(self, result: dict):
         was_cancelled = self._cancelled_flag()
