@@ -182,6 +182,8 @@ class TranscriberWorker(QObject):
     def run(self):
         tmp_wav = None
         tmp_clean_wav = None
+        # 에러/취소 시 확실하게 해제하기 위해 대용량 객체를 추적한다.
+        _heavy_refs = {}  # name → object, finally에서 일괄 삭제
         try:
             ffmpeg = get_ffmpeg_exe()
             use_diar = self.use_diarization and self.hf_token
@@ -204,6 +206,7 @@ class TranscriberWorker(QObject):
             self.progress.emit(8 if use_diar else 10, f"[2/{step_total}] 오디오 로드 및 전처리 중...")
             self._log("오디오 로드 중...")
             audio = load_wav_as_numpy(tmp_wav)
+            _heavy_refs["audio"] = audio
             duration = get_video_duration(audio)  # 원본 영상 길이 (결과용)
             self._log(f"오디오 길이: {duration:.1f}초")
             if self._cancelled:
@@ -281,6 +284,7 @@ class TranscriberWorker(QObject):
             self._log(f"Whisper 모델 로드 중: {self.model_name}")
             from src.model_utils import get_whisper_cache_dir
             model = whisper.load_model(self.model_name, download_root=get_whisper_cache_dir())
+            _heavy_refs["model"] = model
             self._log("Whisper 모델 로드 완료")
             if self._cancelled:
                 self.error.emit("사용자가 변환을 취소했습니다.")
@@ -335,6 +339,7 @@ class TranscriberWorker(QObject):
 
                 # 워커 모델 사전 생성 후 원본 즉시 해제 (메모리 절감)
                 _worker_models = [model]  # 원본을 첫 번째 워커에 할당
+                _heavy_refs["_worker_models"] = _worker_models
                 for i in range(effective_workers - 1):
                     try:
                         _worker_models.append(copy.deepcopy(model))
@@ -663,7 +668,14 @@ class TranscriberWorker(QObject):
             self.error.emit(str(e))
         finally:
             # ── 메모리 정리 ──
-            # 예외/취소 등으로 정상 경로에서 해제하지 못한 대용량 객체 정리
+            # 대용량 객체(모델, 오디오 배열 등)를 명시적으로 해제한다.
+            for name in list(_heavy_refs.keys()):
+                try:
+                    del _heavy_refs[name]
+                except Exception:
+                    pass
+            _heavy_refs.clear()
+
             gc.collect()
             try:
                 import torch as _torch_cleanup

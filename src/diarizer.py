@@ -219,47 +219,48 @@ def _extract_embeddings(
         "pyannote/wespeaker-voxceleb-resnet34-LM",
         device=device,
     )
-    audio_io = Audio(sample_rate=16000, mono="downmix")
-
-    if log_callback:
-        log_callback(f"임베딩 추출 시작: {len(segments)}개 구간, batch_size={batch_size}")
-
-    all_embeddings = []
-    for batch_start in range(0, len(segments), batch_size):
-        if cancel_check and cancel_check():
-            raise DiarizationCancelled("사용자가 화자 분석을 취소했습니다.")
-
-        batch_segs = segments[batch_start:batch_start + batch_size]
-
-        # 배치 내 가장 긴 구간에 맞춰 패딩
-        waveforms = []
-        for seg in batch_segs:
-            waveform, _ = audio_io.crop(audio_path, Segment(seg["start"], seg["end"]))
-            waveforms.append(waveform.squeeze(0))  # (num_samples,)
-
-        max_len = max(w.shape[0] for w in waveforms)
-        padded = torch.zeros(len(waveforms), 1, max_len)
-        for i, w in enumerate(waveforms):
-            padded[i, 0, :w.shape[0]] = w
-
-        with torch.inference_mode():
-            emb = model(padded.to(device))  # (batch_size, D)
-        all_embeddings.append(emb)
-
-        if progress_callback:
-            done = min(batch_start + batch_size, len(segments))
-            progress_callback(done, len(segments))
+    try:
+        audio_io = Audio(sample_rate=16000, mono="downmix")
 
         if log_callback:
-            done = min(batch_start + batch_size, len(segments))
-            log_callback(f"임베딩 추출: {done}/{len(segments)}")
+            log_callback(f"임베딩 추출 시작: {len(segments)}개 구간, batch_size={batch_size}")
 
-    del model
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+        all_embeddings = []
+        for batch_start in range(0, len(segments), batch_size):
+            if cancel_check and cancel_check():
+                raise DiarizationCancelled("사용자가 화자 분석을 취소했습니다.")
 
-    return np.vstack(all_embeddings)
+            batch_segs = segments[batch_start:batch_start + batch_size]
+
+            # 배치 내 가장 긴 구간에 맞춰 패딩
+            waveforms = []
+            for seg in batch_segs:
+                waveform, _ = audio_io.crop(audio_path, Segment(seg["start"], seg["end"]))
+                waveforms.append(waveform.squeeze(0))  # (num_samples,)
+
+            max_len = max(w.shape[0] for w in waveforms)
+            padded = torch.zeros(len(waveforms), 1, max_len)
+            for i, w in enumerate(waveforms):
+                padded[i, 0, :w.shape[0]] = w
+
+            with torch.inference_mode():
+                emb = model(padded.to(device))  # (batch_size, D)
+            all_embeddings.append(emb)
+
+            if progress_callback:
+                done = min(batch_start + batch_size, len(segments))
+                progress_callback(done, len(segments))
+
+            if log_callback:
+                done = min(batch_start + batch_size, len(segments))
+                log_callback(f"임베딩 추출: {done}/{len(segments)}")
+
+        return np.vstack(all_embeddings)
+    finally:
+        del model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 def run_diarization(

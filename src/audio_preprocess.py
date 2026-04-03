@@ -74,28 +74,29 @@ def get_speech_segments(
     import torch
 
     model, utils = _load_silero_vad()
-    get_speech_timestamps = utils[0]
+    try:
+        get_speech_timestamps = utils[0]
 
-    audio_tensor = torch.from_numpy(audio)
+        audio_tensor = torch.from_numpy(audio)
 
-    speech_timestamps = get_speech_timestamps(
-        audio_tensor,
-        model,
-        sampling_rate=SAMPLE_RATE,
-        threshold=threshold,
-        min_speech_duration_ms=min_speech_ms,
-        min_silence_duration_ms=min_silence_ms,
-        speech_pad_ms=speech_pad_ms,
-    )
+        speech_timestamps = get_speech_timestamps(
+            audio_tensor,
+            model,
+            sampling_rate=SAMPLE_RATE,
+            threshold=threshold,
+            min_speech_duration_ms=min_speech_ms,
+            min_silence_duration_ms=min_silence_ms,
+            speech_pad_ms=speech_pad_ms,
+        )
 
-    del model, utils, audio_tensor
-    import gc as _gc
-    _gc.collect()
-
-    return [
-        {"start": ts["start"] / SAMPLE_RATE, "end": ts["end"] / SAMPLE_RATE}
-        for ts in speech_timestamps
-    ]
+        return [
+            {"start": ts["start"] / SAMPLE_RATE, "end": ts["end"] / SAMPLE_RATE}
+            for ts in speech_timestamps
+        ]
+    finally:
+        del model, utils
+        import gc as _gc
+        _gc.collect()
 
 
 def suppress_non_speech(audio: np.ndarray, threshold: float = 0.35) -> np.ndarray:
@@ -191,39 +192,39 @@ def separate_vocals(audio: np.ndarray, log_callback=None) -> np.ndarray:
     model = get_model("htdemucs")
     model.to(device)
 
-    # 16kHz mono → 44100Hz stereo (Demucs 입력 형식)
-    audio_tensor = torch.from_numpy(audio).float().unsqueeze(0)  # (1, samples)
-    audio_44k = F.resample(audio_tensor, SAMPLE_RATE, model.samplerate)
-    # mono → stereo
-    audio_stereo = audio_44k.expand(2, -1)  # (2, samples)
+    try:
+        # 16kHz mono → 44100Hz stereo (Demucs 입력 형식)
+        audio_tensor = torch.from_numpy(audio).float().unsqueeze(0)  # (1, samples)
+        audio_44k = F.resample(audio_tensor, SAMPLE_RATE, model.samplerate)
+        # mono → stereo
+        audio_stereo = audio_44k.expand(2, -1)  # (2, samples)
 
-    if log_callback:
-        log_callback("보컬 분리 처리 중...")
+        if log_callback:
+            log_callback("보컬 분리 처리 중...")
 
-    # apply_model expects (batch, channels, samples)
-    mix = audio_stereo.unsqueeze(0).to(device)  # (1, 2, samples)
-    with torch.inference_mode():
-        sources = apply_model(model, mix, device=device)
-    # sources shape: (1, n_sources, 2, samples)
-    # model.sources = ['drums', 'bass', 'other', 'vocals']
-    vocal_idx = model.sources.index("vocals")
-    vocals = sources[0, vocal_idx].cpu()  # (2, samples)
+        # apply_model expects (batch, channels, samples)
+        mix = audio_stereo.unsqueeze(0).to(device)  # (1, 2, samples)
+        with torch.inference_mode():
+            sources = apply_model(model, mix, device=device)
+        # sources shape: (1, n_sources, 2, samples)
+        # model.sources = ['drums', 'bass', 'other', 'vocals']
+        vocal_idx = model.sources.index("vocals")
+        vocals = sources[0, vocal_idx].cpu()  # (2, samples)
 
-    # stereo → mono, 44100Hz → 16kHz
-    vocals_mono = vocals.mean(dim=0, keepdim=True)  # (1, samples)
-    vocals_16k = F.resample(vocals_mono, model.samplerate, SAMPLE_RATE)
-    result = vocals_16k.squeeze().numpy().astype(np.float32)
+        # stereo → mono, 44100Hz → 16kHz
+        vocals_mono = vocals.mean(dim=0, keepdim=True)  # (1, samples)
+        vocals_16k = F.resample(vocals_mono, model.samplerate, SAMPLE_RATE)
+        result = vocals_16k.squeeze().numpy().astype(np.float32)
 
-    if log_callback:
-        log_callback("보컬 분리 완료")
+        if log_callback:
+            log_callback("보컬 분리 완료")
 
-    # 메모리 해제
-    del model, sources, vocals, mix, audio_tensor, audio_44k, audio_stereo
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-    return result
+        return result
+    finally:
+        del model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 # ---------------------------------------------------------------------------
