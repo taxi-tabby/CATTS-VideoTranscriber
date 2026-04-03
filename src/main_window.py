@@ -3,8 +3,8 @@ import sys
 import time
 import webbrowser
 
-from PySide6.QtCore import Qt, QThread, QTimer, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QFont, QIcon, QShortcut, QKeySequence, QTextCursor
+from PySide6.QtCore import Qt, QThread, QTimer, QUrl, QPropertyAnimation, QEasingCurve, Property
+from PySide6.QtGui import QAction, QDesktopServices, QFont, QIcon, QShortcut, QKeySequence, QTextCursor, QPainter, QColor, QPen, QLinearGradient
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -47,6 +47,112 @@ class _DroppableTreeWidget(QTreeWidget):
     def dropEvent(self, event):
         super().dropEvent(event)
         self.itemDropped.emit()
+
+
+class _GlowOverlay(QWidget):
+    """변환 중 창 테두리에 흐르는 그라데이션 글로우 효과."""
+
+    _COLORS = [
+        QColor(123, 164, 212, 180),   # #7BA4D4
+        QColor(155, 142, 212, 180),   # #9B8ED4
+        QColor(125, 212, 212, 180),   # #7DD4D4
+        QColor(155, 142, 212, 180),   # #9B8ED4
+        QColor(123, 164, 212, 180),   # #7BA4D4
+    ]
+    _BORDER = 3
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+        self._offset = 0.0
+        self._opacity = 0.0
+
+        self._anim_timer = QTimer(self)
+        self._anim_timer.setInterval(30)
+        self._anim_timer.timeout.connect(self._tick)
+
+        self._fade_anim = QPropertyAnimation(self, b"opacity", self)
+        self._fade_anim.setDuration(500)
+        self._fade_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+    def _get_opacity(self):
+        return self._opacity
+
+    def _set_opacity(self, v):
+        self._opacity = v
+        self.update()
+
+    opacity = Property(float, _get_opacity, _set_opacity)
+
+    def start(self):
+        self.show()
+        self.raise_()
+        self._fade_anim.stop()
+        self._fade_anim.setStartValue(self._opacity)
+        self._fade_anim.setEndValue(1.0)
+        self._fade_anim.start()
+        self._anim_timer.start()
+
+    def stop(self):
+        self._anim_timer.stop()
+        self._fade_anim.stop()
+        self._fade_anim.setStartValue(self._opacity)
+        self._fade_anim.setEndValue(0.0)
+        try:
+            self._fade_anim.finished.disconnect(self.hide)
+        except RuntimeError:
+            pass
+        self._fade_anim.finished.connect(self.hide)
+        self._fade_anim.start()
+
+    def _tick(self):
+        self._offset = (self._offset + 0.008) % 1.0
+        self.update()
+
+    def paintEvent(self, _event):
+        if self._opacity <= 0:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setOpacity(self._opacity)
+
+        w, h = self.width(), self.height()
+        b = self._BORDER
+        perimeter = 2 * (w + h)
+
+        def _pos_to_point(t):
+            """0~1 비율을 테두리 위의 좌표로 변환."""
+            d = t * perimeter
+            if d < w:
+                return d, 0
+            d -= w
+            if d < h:
+                return w, d
+            d -= h
+            if d < w:
+                return w - d, h
+            d -= w
+            return 0, h - d
+
+        # 그라데이션 시작/끝 좌표
+        t0 = self._offset
+        t1 = (self._offset + 0.5) % 1.0
+        x0, y0 = _pos_to_point(t0)
+        x1, y1 = _pos_to_point(t1)
+
+        grad = QLinearGradient(x0, y0, x1, y1)
+        for i, c in enumerate(self._COLORS):
+            grad.setColorAt(i / (len(self._COLORS) - 1), c)
+
+        pen = QPen(grad, b)
+        pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        half = b / 2
+        p.drawRoundedRect(half, half, w - b, h - b, 6, 6)
+        p.end()
 
 
 from src.config import (
@@ -1148,6 +1254,10 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(bottom)
 
+        # 변환 중 글로우 오버레이
+        self._glow = _GlowOverlay(central)
+        self._glow.hide()
+
         self._show_detail(False)
 
     def _show_detail(self, show: bool):
@@ -1370,6 +1480,7 @@ class MainWindow(QMainWindow):
                 self.tree_widget.takeTopLevelItem(idx)
             self._live_item = None
             self.tree_widget.setEnabled(True)
+            self._glow.stop()
 
     # ── 컨텍스트 메뉴 ──
 
@@ -1611,6 +1722,8 @@ class MainWindow(QMainWindow):
         self.tree_widget.insertTopLevelItem(0, self._live_item)
         self.tree_widget.setCurrentItem(self._live_item)
         self.tree_widget.setEnabled(False)
+        self._glow.setGeometry(self.centralWidget().rect())
+        self._glow.start()
 
         self._show_detail(True)
         self.lbl_title.setText(self._live_filename)
@@ -2140,6 +2253,11 @@ class MainWindow(QMainWindow):
             return
 
         self._start_transcription(path, settings, hf_token)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, '_glow'):
+            self._glow.setGeometry(self.centralWidget().rect())
 
     def closeEvent(self, event):
         if self._thread and self._thread.isRunning():
