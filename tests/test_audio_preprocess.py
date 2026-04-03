@@ -1,14 +1,8 @@
-import sys
 import numpy as np
 import pytest
 from unittest.mock import patch, MagicMock
 
 SAMPLE_RATE = 16000
-
-# torch가 설치되지 않은 환경에서도 테스트할 수 있도록 mock 처리
-mock_torch = MagicMock()
-mock_torch.from_numpy = MagicMock(side_effect=lambda x: x)
-sys.modules.setdefault("torch", mock_torch)
 
 
 class TestGetSpeechSegments:
