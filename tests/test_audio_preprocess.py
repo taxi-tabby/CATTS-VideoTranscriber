@@ -46,3 +46,66 @@ class TestGetSpeechSegments:
             segments = get_speech_segments(audio)
 
         assert segments == []
+
+
+class TestMergeSpeechSegments:
+    def test_merge_short_gap(self):
+        """0.5초 미만 간격의 인접 구간을 병합해야 한다."""
+        from src.audio_preprocess import merge_speech_segments
+        segments = [
+            {"start": 0.0, "end": 2.0},
+            {"start": 2.3, "end": 5.0},
+        ]
+        result = merge_speech_segments(segments, min_gap=0.5)
+        assert len(result) == 1
+        assert result[0]["start"] == 0.0
+        assert result[0]["end"] == 5.0
+
+    def test_keep_large_gap(self):
+        """0.5초 이상 간격은 유지해야 한다."""
+        from src.audio_preprocess import merge_speech_segments
+        segments = [
+            {"start": 0.0, "end": 2.0},
+            {"start": 3.0, "end": 5.0},
+        ]
+        result = merge_speech_segments(segments, min_gap=0.5)
+        assert len(result) == 2
+
+    def test_drop_short_segments(self):
+        """min_duration 미만의 세그먼트는 제거해야 한다."""
+        from src.audio_preprocess import merge_speech_segments
+        segments = [
+            {"start": 0.0, "end": 0.3},
+            {"start": 5.0, "end": 8.0},
+        ]
+        result = merge_speech_segments(segments, min_duration=0.5)
+        assert len(result) == 1
+        assert result[0]["start"] == 5.0
+
+    def test_empty_input(self):
+        from src.audio_preprocess import merge_speech_segments
+        assert merge_speech_segments([]) == []
+
+
+class TestSplitLongSegments:
+    def test_split_long_segment(self):
+        """max_duration보다 긴 구간을 분할해야 한다."""
+        from src.audio_preprocess import split_long_segments
+        segments = [{"start": 0.0, "end": 25.0}]
+        result = split_long_segments(segments, max_duration=10.0)
+        assert len(result) == 3
+        assert result[0] == {"start": 0.0, "end": 10.0}
+        assert result[1] == {"start": 10.0, "end": 20.0}
+        assert result[2] == {"start": 20.0, "end": 25.0}
+
+    def test_short_segment_unchanged(self):
+        """max_duration 이하 구간은 그대로 유지해야 한다."""
+        from src.audio_preprocess import split_long_segments
+        segments = [{"start": 0.0, "end": 5.0}]
+        result = split_long_segments(segments, max_duration=10.0)
+        assert len(result) == 1
+        assert result[0] == {"start": 0.0, "end": 5.0}
+
+    def test_empty_input(self):
+        from src.audio_preprocess import split_long_segments
+        assert split_long_segments([]) == []

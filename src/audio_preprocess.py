@@ -184,3 +184,56 @@ def preprocess(audio: np.ndarray) -> tuple[np.ndarray, int]:
     audio, trim_offset = trim_silence(audio)
     audio = normalize_peak(audio)
     return audio, trim_offset
+
+
+# ---------------------------------------------------------------------------
+# 화자분리용 세그먼트 후처리
+# ---------------------------------------------------------------------------
+
+def merge_speech_segments(
+    segments: list[dict],
+    min_gap: float = 0.5,
+    min_duration: float = 0.5,
+) -> list[dict]:
+    """인접 구간을 병합하고 짧은 구간을 제거한다.
+
+    Args:
+        segments: [{"start": float, "end": float}, ...] (초 단위, 정렬되어 있어야 함)
+        min_gap: 이 값 미만의 간격은 병합한다 (초)
+        min_duration: 이 값 미만의 구간은 제거한다 (초)
+    """
+    if not segments:
+        return []
+
+    merged = [segments[0].copy()]
+    for seg in segments[1:]:
+        if seg["start"] - merged[-1]["end"] < min_gap:
+            merged[-1]["end"] = seg["end"]
+        else:
+            merged.append(seg.copy())
+
+    return [s for s in merged if s["end"] - s["start"] >= min_duration]
+
+
+def split_long_segments(
+    segments: list[dict],
+    max_duration: float = 10.0,
+) -> list[dict]:
+    """긴 구간을 max_duration 단위로 분할한다.
+
+    Args:
+        segments: [{"start": float, "end": float}, ...] (초 단위)
+        max_duration: 이 값을 초과하면 분할한다 (초)
+    """
+    result = []
+    for seg in segments:
+        duration = seg["end"] - seg["start"]
+        if duration <= max_duration:
+            result.append(seg.copy())
+        else:
+            t = seg["start"]
+            while t < seg["end"]:
+                end = min(t + max_duration, seg["end"])
+                result.append({"start": t, "end": end})
+                t = end
+    return result
