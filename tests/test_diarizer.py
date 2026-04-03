@@ -1,4 +1,5 @@
 import pytest
+import numpy as np
 from src.diarizer import assign_speakers, map_speaker_labels
 
 
@@ -127,3 +128,90 @@ class TestMapSpeakerLabels:
         result = map_speaker_labels(segments)
         assert result[0]["speaker"] == "화자 1"
         assert result[1]["speaker"] == "화자 2"
+
+
+class TestEstimateNumSpeakers:
+    def test_single_speaker_high_similarity(self):
+        """임베딩이 모두 유사하면 화자 1명으로 판정해야 한다."""
+        from src.diarizer import _estimate_num_speakers
+        rng = np.random.RandomState(42)
+        base = rng.randn(256).astype(np.float32)
+        base = base / np.linalg.norm(base)
+        embeddings = np.array([base + rng.randn(256) * 0.01 for _ in range(5)])
+        embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+
+        result = _estimate_num_speakers(embeddings, max_speakers=5)
+        assert result == 1
+
+    def test_two_distinct_speakers(self):
+        """두 클러스터가 뚜렷하면 화자 2명으로 판정해야 한다."""
+        from src.diarizer import _estimate_num_speakers
+        rng = np.random.RandomState(42)
+        center_a = rng.randn(256).astype(np.float32)
+        center_b = -center_a
+        embeddings_a = np.array([center_a + rng.randn(256) * 0.05 for _ in range(5)])
+        embeddings_b = np.array([center_b + rng.randn(256) * 0.05 for _ in range(5)])
+        embeddings = np.vstack([embeddings_a, embeddings_b])
+        embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+
+        result = _estimate_num_speakers(embeddings, max_speakers=5)
+        assert result == 2
+
+    def test_respects_max_speakers(self):
+        """max_speakers를 초과하지 않아야 한다."""
+        from src.diarizer import _estimate_num_speakers
+        rng = np.random.RandomState(42)
+        embeddings = []
+        for i in range(3):
+            center = np.zeros(256, dtype=np.float32)
+            center[i * 80:(i + 1) * 80] = 1.0
+            for _ in range(5):
+                embeddings.append(center + rng.randn(256) * 0.05)
+        embeddings = np.array(embeddings)
+        embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+
+        result = _estimate_num_speakers(embeddings, max_speakers=2)
+        assert result <= 2
+
+    def test_single_embedding_returns_one(self):
+        """임베딩이 1개면 화자 1명이다."""
+        from src.diarizer import _estimate_num_speakers
+        embeddings = np.random.randn(1, 256).astype(np.float32)
+        result = _estimate_num_speakers(embeddings, max_speakers=5)
+        assert result == 1
+
+
+class TestClusterEmbeddings:
+    def test_assigns_labels_to_segments(self):
+        """각 세그먼트에 speaker 라벨을 할당해야 한다."""
+        from src.diarizer import _cluster_embeddings
+        rng = np.random.RandomState(42)
+        center_a = rng.randn(256).astype(np.float32)
+        center_b = -center_a
+        embeddings = np.vstack([
+            np.array([center_a + rng.randn(256) * 0.05 for _ in range(3)]),
+            np.array([center_b + rng.randn(256) * 0.05 for _ in range(3)]),
+        ])
+        embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+
+        segments = [
+            {"start": float(i), "end": float(i + 1)}
+            for i in range(6)
+        ]
+
+        result = _cluster_embeddings(embeddings, segments, num_speakers=2)
+        assert len(result) == 6
+        assert result[0]["speaker"] == result[1]["speaker"] == result[2]["speaker"]
+        assert result[3]["speaker"] == result[4]["speaker"] == result[5]["speaker"]
+        assert result[0]["speaker"] != result[3]["speaker"]
+        assert result[0]["speaker"].startswith("SPEAKER_")
+
+    def test_single_speaker(self):
+        """num_speakers=1이면 모두 같은 화자여야 한다."""
+        from src.diarizer import _cluster_embeddings
+        embeddings = np.random.randn(5, 256).astype(np.float32)
+        segments = [{"start": float(i), "end": float(i + 1)} for i in range(5)]
+
+        result = _cluster_embeddings(embeddings, segments, num_speakers=1)
+        speakers = set(r["speaker"] for r in result)
+        assert len(speakers) == 1

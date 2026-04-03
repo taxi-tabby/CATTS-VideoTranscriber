@@ -4,6 +4,7 @@ import threading
 import time
 from collections import defaultdict
 
+import numpy as np
 import torch
 
 
@@ -23,6 +24,108 @@ _DIAR_STEP_ORDER = list(_DIAR_STEPS.keys())
 class DiarizationCancelled(Exception):
     """사용자 취소 시 hook에서 발생시키는 예외."""
     pass
+
+
+def _estimate_num_speakers(
+    embeddings: np.ndarray,
+    max_speakers: int = 10,
+    min_speakers: int = 1,
+    similarity_threshold: float = 0.7,
+) -> int:
+    """silhouette score 기반으로 최적 화자 수를 추정한다.
+
+    Args:
+        embeddings: (N, D) 형태의 임베딩 배열
+        max_speakers: 탐색할 최대 화자 수
+        min_speakers: 최소 화자 수
+        similarity_threshold: k=1 판정용 cosine similarity 임계값
+
+    Returns:
+        추정된 화자 수
+    """
+    from sklearn.cluster import AgglomerativeClustering
+    from sklearn.metrics import silhouette_score
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    n = len(embeddings)
+    if n <= 1:
+        return 1
+
+    # k=1 특수 처리: 모든 임베딩 간 cosine similarity가 높으면 화자 1명
+    sim_matrix = cosine_similarity(embeddings)
+    np.fill_diagonal(sim_matrix, 0)
+    mean_sim = sim_matrix.sum() / (n * (n - 1))
+    if mean_sim >= similarity_threshold:
+        return 1
+
+    # k=2~max_speakers까지 silhouette score 비교
+    max_k = min(max_speakers, n)
+    if max_k < 2:
+        return 1
+
+    best_k = 1
+    best_score = -1.0
+
+    for k in range(max(2, min_speakers), max_k + 1):
+        clustering = AgglomerativeClustering(
+            n_clusters=k,
+            metric="cosine",
+            linkage="average",
+        )
+        labels = clustering.fit_predict(embeddings)
+
+        if len(set(labels)) < 2:
+            continue
+
+        score = silhouette_score(embeddings, labels, metric="cosine")
+        if score > best_score:
+            best_score = score
+            best_k = k
+
+    return best_k
+
+
+def _cluster_embeddings(
+    embeddings: np.ndarray,
+    segments: list[dict],
+    num_speakers: int,
+) -> list[dict]:
+    """임베딩을 클러스터링하여 각 세그먼트에 speaker 라벨을 할당한다.
+
+    Args:
+        embeddings: (N, D) 형태의 임베딩 배열
+        segments: [{"start": float, "end": float}, ...] 세그먼트 리스트
+        num_speakers: 화자 수
+
+    Returns:
+        [{"start": float, "end": float, "speaker": str}, ...] 형태의 리스트.
+        speaker는 "SPEAKER_00", "SPEAKER_01", ... 형식.
+    """
+    from sklearn.cluster import AgglomerativeClustering
+
+    n = len(embeddings)
+
+    if num_speakers == 1 or n == 1:
+        return [
+            {"start": s["start"], "end": s["end"], "speaker": "SPEAKER_00"}
+            for s in segments
+        ]
+
+    clustering = AgglomerativeClustering(
+        n_clusters=num_speakers,
+        metric="cosine",
+        linkage="average",
+    )
+    labels = clustering.fit_predict(embeddings)
+
+    return [
+        {
+            "start": segments[i]["start"],
+            "end": segments[i]["end"],
+            "speaker": f"SPEAKER_{labels[i]:02d}",
+        }
+        for i in range(n)
+    ]
 
 
 def run_diarization(
