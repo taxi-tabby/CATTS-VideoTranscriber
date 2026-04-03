@@ -3,8 +3,8 @@ import sys
 import time
 import webbrowser
 
-from PySide6.QtCore import Qt, QThread, QTimer, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QFont, QIcon, QShortcut, QKeySequence, QTextCursor
+from PySide6.QtCore import Qt, QThread, QTimer, QUrl, QPropertyAnimation, QEasingCurve, Property
+from PySide6.QtGui import QAction, QDesktopServices, QFont, QIcon, QShortcut, QKeySequence, QTextCursor, QPainter, QColor, QPen, QLinearGradient
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -47,6 +47,112 @@ class _DroppableTreeWidget(QTreeWidget):
     def dropEvent(self, event):
         super().dropEvent(event)
         self.itemDropped.emit()
+
+
+class _GlowOverlay(QWidget):
+    """변환 중 창 테두리에 흐르는 그라데이션 글로우 효과."""
+
+    _COLORS = [
+        QColor(123, 164, 212, 180),   # #7BA4D4
+        QColor(155, 142, 212, 180),   # #9B8ED4
+        QColor(125, 212, 212, 180),   # #7DD4D4
+        QColor(155, 142, 212, 180),   # #9B8ED4
+        QColor(123, 164, 212, 180),   # #7BA4D4
+    ]
+    _BORDER = 3
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+        self._offset = 0.0
+        self._opacity = 0.0
+
+        self._anim_timer = QTimer(self)
+        self._anim_timer.setInterval(30)
+        self._anim_timer.timeout.connect(self._tick)
+
+        self._fade_anim = QPropertyAnimation(self, b"opacity", self)
+        self._fade_anim.setDuration(500)
+        self._fade_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+    def _get_opacity(self):
+        return self._opacity
+
+    def _set_opacity(self, v):
+        self._opacity = v
+        self.update()
+
+    opacity = Property(float, _get_opacity, _set_opacity)
+
+    def start(self):
+        self.show()
+        self.raise_()
+        self._fade_anim.stop()
+        self._fade_anim.setStartValue(self._opacity)
+        self._fade_anim.setEndValue(1.0)
+        self._fade_anim.start()
+        self._anim_timer.start()
+
+    def stop(self):
+        self._anim_timer.stop()
+        self._fade_anim.stop()
+        self._fade_anim.setStartValue(self._opacity)
+        self._fade_anim.setEndValue(0.0)
+        try:
+            self._fade_anim.finished.disconnect(self.hide)
+        except RuntimeError:
+            pass
+        self._fade_anim.finished.connect(self.hide)
+        self._fade_anim.start()
+
+    def _tick(self):
+        self._offset = (self._offset + 0.008) % 1.0
+        self.update()
+
+    def paintEvent(self, _event):
+        if self._opacity <= 0:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setOpacity(self._opacity)
+
+        w, h = self.width(), self.height()
+        b = self._BORDER
+        perimeter = 2 * (w + h)
+
+        def _pos_to_point(t):
+            """0~1 비율을 테두리 위의 좌표로 변환."""
+            d = t * perimeter
+            if d < w:
+                return d, 0
+            d -= w
+            if d < h:
+                return w, d
+            d -= h
+            if d < w:
+                return w - d, h
+            d -= w
+            return 0, h - d
+
+        # 그라데이션 시작/끝 좌표
+        t0 = self._offset
+        t1 = (self._offset + 0.5) % 1.0
+        x0, y0 = _pos_to_point(t0)
+        x1, y1 = _pos_to_point(t1)
+
+        grad = QLinearGradient(x0, y0, x1, y1)
+        for i, c in enumerate(self._COLORS):
+            grad.setColorAt(i / (len(self._COLORS) - 1), c)
+
+        pen = QPen(grad, b)
+        pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        half = b / 2
+        p.drawRoundedRect(half, half, w - b, h - b, 6, 6)
+        p.end()
 
 
 from src.config import (
@@ -1148,6 +1254,10 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(bottom)
 
+        # 변환 중 글로우 오버레이
+        self._glow = _GlowOverlay(central)
+        self._glow.hide()
+
         self._show_detail(False)
 
     def _show_detail(self, show: bool):
@@ -1369,6 +1479,8 @@ class MainWindow(QMainWindow):
             if idx >= 0:
                 self.tree_widget.takeTopLevelItem(idx)
             self._live_item = None
+            self.tree_widget.setEnabled(True)
+            self._glow.stop()
 
     # ── 컨텍스트 메뉴 ──
 
@@ -1609,6 +1721,9 @@ class MainWindow(QMainWindow):
         self._live_item.setData(0, Qt.ItemDataRole.UserRole + 1, "live")
         self.tree_widget.insertTopLevelItem(0, self._live_item)
         self.tree_widget.setCurrentItem(self._live_item)
+        self.tree_widget.setEnabled(False)
+        self._glow.setGeometry(self.centralWidget().rect())
+        self._glow.start()
 
         self._show_detail(True)
         self.lbl_title.setText(self._live_filename)
@@ -1660,7 +1775,11 @@ class MainWindow(QMainWindow):
         self._worker.finished.connect(self._on_finished)
         self._worker.error.connect(self._on_error)
 
-        # QThread 안전 정리: thread.finished(이벤트 루프 종료 후)에서 deleteLater
+        # QThread 안전 정리: thread.finished(이벤트 루프 종료 후)에서
+        # Python 참조 해제 + C++ deleteLater.
+        # finished 시그널은 run()의 finally 블록까지 완료된 후 발생하므로
+        # 워커가 아직 실행 중일 때 참조가 해제되는 race condition을 방지한다.
+        self._thread.finished.connect(self._release_thread_refs)
         self._thread.finished.connect(self._worker.deleteLater)
         self._thread.finished.connect(self._thread.deleteLater)
 
@@ -1730,24 +1849,48 @@ class MainWindow(QMainWindow):
                 separator = " " if has_content else ""
                 cursor.insertText(f"{separator}{seg['text']}")
 
+    def _release_thread_refs(self):
+        """QThread.finished 시그널에 의해 호출 — 스레드 완전 종료 후 참조 해제."""
+        self._worker = None
+        self._thread = None
+
     def _cleanup_thread(self, wait_ms: int = 0):
         """QThread/Worker 안전 정리.
 
-        quit()으로 이벤트 루프 종료를 요청하고 참조를 해제한다.
-        실제 C++ 객체 소멸은 thread.finished → deleteLater 체인에 의해
-        Qt 이벤트 루프가 안전한 시점에 처리된다.
+        quit()으로 이벤트 루프 종료를 요청한다.
+        wait_ms > 0이면 동기 대기 후 참조를 즉시 해제하고,
+        그렇지 않으면 thread.finished 시그널에서 비동기로 해제한다.
 
         Args:
             wait_ms: >0이면 스레드 종료까지 동기 대기 (취소/종료 시 사용).
+                     0이면 비동기 — thread.finished에서 참조 해제.
         """
         if self._thread is not None:
             self._thread.quit()
             if wait_ms > 0:
-                self._thread.wait(wait_ms)
-        self._worker = None
-        self._thread = None
+                if not self._thread.wait(wait_ms):
+                    print(f"[warning] 워커 스레드가 {wait_ms}ms 내에 종료되지 않음")
+                # 동기 대기 완료 — 즉시 해제 안전
+                self._worker = None
+                self._thread = None
 
     def _on_finished(self, result: dict):
+        try:
+            self._on_finished_inner(result)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            from src.crash_reporter import _show_crash_dialog
+            tb_str = traceback.format_exc()
+            log_text = self.txt_log.toPlainText() if hasattr(self, "txt_log") else ""
+            _show_crash_dialog(
+                f"변환 완료 처리 중 오류: {traceback.format_exc().splitlines()[-1]}",
+                error_traceback=tb_str,
+                processing_log=log_text,
+                parent=self,
+            )
+
+    def _on_finished_inner(self, result: dict):
         was_cancelled = self._cancelled_flag()
         self._cleanup_thread()
 
@@ -1840,6 +1983,22 @@ class MainWindow(QMainWindow):
         return False
 
     def _on_error(self, message: str):
+        try:
+            self._on_error_inner(message)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            from src.crash_reporter import _show_crash_dialog
+            tb_str = traceback.format_exc()
+            log_text = self.txt_log.toPlainText() if hasattr(self, "txt_log") else ""
+            _show_crash_dialog(
+                f"오류 처리 중 추가 오류: {traceback.format_exc().splitlines()[-1]}",
+                error_traceback=tb_str,
+                processing_log=log_text,
+                parent=self,
+            )
+
+    def _on_error_inner(self, message: str):
         self._cleanup_thread()
 
         # 점진적 저장: 에러 시에도 부분 결과 보존
@@ -2138,6 +2297,11 @@ class MainWindow(QMainWindow):
             return
 
         self._start_transcription(path, settings, hf_token)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, '_glow'):
+            self._glow.setGeometry(self.centralWidget().rect())
 
     def closeEvent(self, event):
         if self._thread and self._thread.isRunning():

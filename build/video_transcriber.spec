@@ -432,3 +432,21 @@ coll = COLLECT(
     upx_exclude=[],
     name='VideoTranscriber',
 )
+
+if _is_macos:
+    _raw_ver = os.environ.get('APP_VERSION', '0.0.0').lstrip('v')
+    _bundle_ver = _raw_ver if '.' in _raw_ver else f'{_raw_ver}.0.0'
+
+    app = BUNDLE(
+        coll,
+        name='CATTS.app',
+        icon=os.path.abspath('../assets/icon/app.icns') if os.path.exists(os.path.abspath('../assets/icon/app.icns')) else None,
+        bundle_identifier='com.catts.videotranscriber',
+        info_plist={
+            'CFBundleDisplayName': 'CATTS',
+            'CFBundleShortVersionString': _bundle_ver,
+            'CFBundleVersion': _bundle_ver,
+            'NSHighResolutionCapable': True,
+            'NSMicrophoneUsageDescription': 'CATTS needs microphone access for audio transcription.',
+        },
+    )
