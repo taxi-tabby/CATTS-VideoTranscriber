@@ -271,33 +271,48 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Create macOS icon (.icns)
+        run: |
+          mkdir -p app.iconset
+          sips -z 16 16     assets/icon/icon-ui-256.png --out app.iconset/icon_16x16.png
+          sips -z 32 32     assets/icon/icon-ui-256.png --out app.iconset/icon_16x16@2x.png
+          sips -z 32 32     assets/icon/icon-ui-256.png --out app.iconset/icon_32x32.png
+          sips -z 64 64     assets/icon/icon-ui-256.png --out app.iconset/icon_32x32@2x.png
+          sips -z 128 128   assets/icon/icon-ui-128.png --out app.iconset/icon_128x128.png
+          sips -z 256 256   assets/icon/icon-ui-256.png --out app.iconset/icon_128x128@2x.png
+          sips -z 256 256   assets/icon/icon-ui-256.png --out app.iconset/icon_256x256.png
+          sips -z 256 256   assets/icon/icon-ui-256.png --out app.iconset/icon_256x256@2x.png
+          sips -z 256 256   assets/icon/icon-ui-256.png --out app.iconset/icon_512x512.png
+          sips -z 256 256   assets/icon/icon-ui-256.png --out app.iconset/icon_512x512@2x.png
+          iconutil -c icns app.iconset -o assets/icon/app.icns
+
       - name: Build with PyInstaller
         working-directory: build
         run: pyinstaller video_transcriber.spec --distpath output/dist --workpath output/build --clean -y
         env:
           WHISPER_MODEL_PATH: ""
+          APP_VERSION: ${{ needs.version.outputs.tag }}
 
       - name: Verify build (smoke test)
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
-          exe="build/output/dist/VideoTranscriber/VideoTranscriber"
+          exe="build/output/dist/CATTS.app/Contents/MacOS/VideoTranscriber"
           if [ ! -f "$exe" ]; then
             echo "::error::Build output not found: $exe"
             exit 1
           fi
 
           chmod +x "$exe"
-          exe_size=$(du -sh "$exe" | cut -f1)
-          total_size=$(du -sh build/output/dist/VideoTranscriber | cut -f1)
-          echo "Binary: ${exe_size}, Total: ${total_size}"
+          app_size=$(du -sh build/output/dist/CATTS.app | cut -f1)
+          echo "App bundle: ${app_size}"
 
           # selftest 실행
           echo "=== Running selftest ==="
           "$exe" --selftest || true
 
-          # selftest 결과 파일 탐색 (exe 디렉토리 또는 temp)
-          result_file="build/output/dist/VideoTranscriber/_selftest.txt"
+          # selftest 결과 파일 탐색
+          result_file="build/output/dist/CATTS.app/Contents/MacOS/_selftest.txt"
           if [ ! -f "$result_file" ]; then
             result_file="/tmp/_selftest.txt"
           fi
@@ -314,16 +329,27 @@ jobs:
             exit 1
           fi
 
-      - name: Create zip
+      - name: Create DMG installer
         run: |
-          cd build/output/dist
-          zip -r ../../../CATTS-${{ needs.version.outputs.tag }}-macOS-arm64.zip VideoTranscriber/
+          VERSION="${{ needs.version.outputs.tag }}"
+          DMG_NAME="CATTS-${VERSION}-macOS-arm64.dmg"
+
+          # 임시 DMG 디렉토리 구성
+          mkdir -p dmg_content
+          cp -R build/output/dist/CATTS.app dmg_content/
+          ln -s /Applications dmg_content/Applications
+
+          # DMG 생성
+          hdiutil create -volname "CATTS ${VERSION}" \
+            -srcfolder dmg_content \
+            -ov -format UDZO \
+            "${DMG_NAME}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: CATTS-${{ needs.version.outputs.tag }}-macOS-arm64
-          path: CATTS-${{ needs.version.outputs.tag }}-macOS-arm64.zip
+          path: CATTS-${{ needs.version.outputs.tag }}-macOS-arm64.dmg
           retention-days: 14
 
   # ── 릴리스 생성 (모든 빌드 완료 후) ──
@@ -351,5 +377,5 @@ jobs:
             artifacts/CATTS-${{ needs.version.outputs.tag }}-Portable-Windows-x64/CATTS-${{ needs.version.outputs.tag }}-Portable-Windows-x64.zip
             artifacts/CATTS-${{ needs.version.outputs.tag }}-Setup-Windows-x64/CATTS-${{ needs.version.outputs.tag }}-Setup-Windows-x64.exe
             artifacts/CATTS-${{ needs.version.outputs.tag }}-Linux-x86_64/CATTS-${{ needs.version.outputs.tag }}-Linux-x86_64.tar.gz
-            artifacts/CATTS-${{ needs.version.outputs.tag }}-macOS-arm64/CATTS-${{ needs.version.outputs.tag }}-macOS-arm64.zip
+            artifacts/CATTS-${{ needs.version.outputs.tag }}-macOS-arm64/CATTS-${{ needs.version.outputs.tag }}-macOS-arm64.dmg
           generate_release_notes: true
