@@ -169,18 +169,21 @@ def open_issue_url(title: str, body: str) -> None:
 
 
 def install_global_exception_hook(get_window_fn):
-    """전역 예외 훅을 설치한다. GUI 스레드의 미처리 예외를 캐치한다.
+    """전역 예외 훅을 설치한다.
+
+    - sys.excepthook: GUI(메인) 스레드의 미처리 예외
+    - threading.excepthook: 워커 스레드의 미처리 예외
 
     Args:
         get_window_fn: MainWindow 인스턴스를 반환하는 callable.
                        윈도우가 아직 생성되지 않았을 때 None을 반환해도 됨.
     """
+    import threading
+
     _original_hook = sys.excepthook
 
-    def _exception_hook(exc_type, exc_value, exc_tb):
-        # 기본 stderr 출력은 유지
-        _original_hook(exc_type, exc_value, exc_tb)
-
+    def _handle_exception(exc_type, exc_value, exc_tb):
+        """공통 예외 처리 로직."""
         tb_str = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
         error_msg = f"{exc_type.__name__}: {exc_value}"
 
@@ -196,10 +199,29 @@ def install_global_exception_hook(get_window_fn):
                 log_text = window.txt_log.toPlainText()
 
             _show_crash_dialog(error_msg, tb_str, log_text, parent=window)
-        except Exception:
-            pass
+        except Exception as dialog_err:
+            # 다이얼로그 표시 실패 시에도 stderr에 기록
+            print(f"[crash_reporter] 다이얼로그 표시 실패: {dialog_err}", file=sys.stderr)
+            print(f"[crash_reporter] 원본 오류: {error_msg}", file=sys.stderr)
+            print(tb_str, file=sys.stderr)
+
+    def _exception_hook(exc_type, exc_value, exc_tb):
+        # 기본 stderr 출력은 유지
+        _original_hook(exc_type, exc_value, exc_tb)
+        _handle_exception(exc_type, exc_value, exc_tb)
+
+    def _threading_exception_hook(args):
+        # threading.ExceptHookArgs: (exc_type, exc_value, exc_traceback, thread)
+        if args.exc_type is SystemExit:
+            return
+        print(
+            f"[crash_reporter] 스레드 '{args.thread.name if args.thread else '?'}' 예외:",
+            file=sys.stderr,
+        )
+        _handle_exception(args.exc_type, args.exc_value, args.exc_traceback)
 
     sys.excepthook = _exception_hook
+    threading.excepthook = _threading_exception_hook
 
 
 def _show_crash_dialog(

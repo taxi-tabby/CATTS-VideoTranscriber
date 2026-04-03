@@ -1875,6 +1875,22 @@ class MainWindow(QMainWindow):
                 self._thread = None
 
     def _on_finished(self, result: dict):
+        try:
+            self._on_finished_inner(result)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            from src.crash_reporter import _show_crash_dialog
+            tb_str = traceback.format_exc()
+            log_text = self.txt_log.toPlainText() if hasattr(self, "txt_log") else ""
+            _show_crash_dialog(
+                f"변환 완료 처리 중 오류: {traceback.format_exc().splitlines()[-1]}",
+                error_traceback=tb_str,
+                processing_log=log_text,
+                parent=self,
+            )
+
+    def _on_finished_inner(self, result: dict):
         was_cancelled = self._cancelled_flag()
         self._cleanup_thread()
 
@@ -1967,6 +1983,22 @@ class MainWindow(QMainWindow):
         return False
 
     def _on_error(self, message: str):
+        try:
+            self._on_error_inner(message)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            from src.crash_reporter import _show_crash_dialog
+            tb_str = traceback.format_exc()
+            log_text = self.txt_log.toPlainText() if hasattr(self, "txt_log") else ""
+            _show_crash_dialog(
+                f"오류 처리 중 추가 오류: {traceback.format_exc().splitlines()[-1]}",
+                error_traceback=tb_str,
+                processing_log=log_text,
+                parent=self,
+            )
+
+    def _on_error_inner(self, message: str):
         self._cleanup_thread()
 
         # 점진적 저장: 에러 시에도 부분 결과 보존
