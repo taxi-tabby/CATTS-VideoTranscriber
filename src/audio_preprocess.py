@@ -57,18 +57,24 @@ def _load_silero_vad():
     return model, utils
 
 
-def suppress_non_speech(audio: np.ndarray, threshold: float = 0.35) -> np.ndarray:
-    """Silero VAD로 음성이 아닌 구간을 무음(0)으로 만든다.
+def get_speech_segments(
+    audio: np.ndarray,
+    threshold: float = 0.35,
+    min_speech_ms: int = 250,
+    min_silence_ms: int = 100,
+    speech_pad_ms: int = 30,
+) -> list[dict]:
+    """Silero VAD로 음성 구간을 검출한다.
 
-    타이밍을 보존하면서 비음성 구간에서의 Whisper 환각을 방지한다.
-    threshold가 낮을수록 더 많은 구간을 음성으로 판단한다.
+    Returns:
+        [{"start": float(초), "end": float(초)}, ...] 형태의 리스트.
+        음성이 없으면 빈 리스트를 반환한다.
     """
     import torch
 
     model, utils = _load_silero_vad()
     get_speech_timestamps = utils[0]
 
-    # Silero VAD는 torch tensor를 기대
     audio_tensor = torch.from_numpy(audio)
 
     speech_timestamps = get_speech_timestamps(
@@ -76,25 +82,36 @@ def suppress_non_speech(audio: np.ndarray, threshold: float = 0.35) -> np.ndarra
         model,
         sampling_rate=SAMPLE_RATE,
         threshold=threshold,
-        min_speech_duration_ms=250,
-        min_silence_duration_ms=100,
-        speech_pad_ms=30,
+        min_speech_duration_ms=min_speech_ms,
+        min_silence_duration_ms=min_silence_ms,
+        speech_pad_ms=speech_pad_ms,
     )
 
-    # Silero VAD 모델 메모리 해제
     del model, utils, audio_tensor
     import gc as _gc
     _gc.collect()
 
-    if not speech_timestamps:
-        # 음성이 전혀 감지되지 않으면 원본 반환
+    return [
+        {"start": ts["start"] / SAMPLE_RATE, "end": ts["end"] / SAMPLE_RATE}
+        for ts in speech_timestamps
+    ]
+
+
+def suppress_non_speech(audio: np.ndarray, threshold: float = 0.35) -> np.ndarray:
+    """Silero VAD로 음성이 아닌 구간을 무음(0)으로 만든다.
+
+    타이밍을 보존하면서 비음성 구간에서의 Whisper 환각을 방지한다.
+    threshold가 낮을수록 더 많은 구간을 음성으로 판단한다.
+    """
+    segments = get_speech_segments(audio, threshold=threshold)
+
+    if not segments:
         return audio
 
-    # 비음성 구간을 0으로 채움
     suppressed = np.zeros_like(audio)
-    for ts in speech_timestamps:
-        start = ts["start"]
-        end = ts["end"]
+    for seg in segments:
+        start = int(seg["start"] * SAMPLE_RATE)
+        end = int(seg["end"] * SAMPLE_RATE)
         suppressed[start:end] = audio[start:end]
 
     return suppressed
