@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 from unittest.mock import patch, MagicMock
-from src.diarizer import assign_speakers, map_speaker_labels
+from src.diarizer import assign_speakers, map_speaker_labels, DIAR_PROFILES
 
 
 class TestAssignSpeakers:
@@ -286,3 +286,39 @@ class TestRunDiarization:
             )
 
         assert result == []
+
+
+class TestDiarProfiles:
+    def test_interview_profile_exists(self):
+        assert "interview" in DIAR_PROFILES
+
+    def test_noisy_profile_exists(self):
+        assert "noisy" in DIAR_PROFILES
+
+    def test_profiles_have_required_keys(self):
+        required = {"label", "description", "vad_threshold", "min_gap",
+                     "min_duration", "max_duration", "similarity_threshold"}
+        for name, profile in DIAR_PROFILES.items():
+            for key in required:
+                assert key in profile, f"{name} profile missing {key}"
+
+    def test_noisy_has_higher_vad_threshold(self):
+        assert DIAR_PROFILES["noisy"]["vad_threshold"] > DIAR_PROFILES["interview"]["vad_threshold"]
+
+    def test_noisy_has_lower_similarity_threshold(self):
+        assert DIAR_PROFILES["noisy"]["similarity_threshold"] < DIAR_PROFILES["interview"]["similarity_threshold"]
+
+    def test_run_diarization_uses_profile(self):
+        """noisy 프로파일이 _extract_speech_segments에 전달되는지 확인."""
+        from src.diarizer import run_diarization
+
+        with patch("src.diarizer._extract_speech_segments", return_value=[]) as mock_extract:
+            run_diarization(
+                audio_path="dummy.wav",
+                hf_token="dummy_token",
+                profile_name="noisy",
+            )
+
+        call_kwargs = mock_extract.call_args
+        profile_arg = call_kwargs[1].get("profile") or call_kwargs[0][1]
+        assert profile_arg["label"] == "영상/영화/노래"

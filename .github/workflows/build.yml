@@ -10,8 +10,44 @@ permissions:
   contents: write
 
 jobs:
+  # ── 테스트 ──
+  test:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-lock.txt
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsndfile1-dev
+
+      - name: Install PyTorch (CPU)
+        run: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install dependencies
+        run: pip install -r requirements-lock.txt
+
+      - name: Run tests with coverage
+        run: |
+          python -m pytest tests/ \
+            --cov=src \
+            --cov-report=term-missing \
+            --cov-fail-under=60 \
+            --ignore=tests/test_torch_load_patch.py \
+            -v
+
   # ── 버전 결정 (공유) ──
   version:
+    needs: test
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     outputs:

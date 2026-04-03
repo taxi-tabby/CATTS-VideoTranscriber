@@ -5,6 +5,107 @@ from unittest.mock import patch, MagicMock
 SAMPLE_RATE = 16000
 
 
+class TestHighpassFilter:
+    def test_output_same_length(self):
+        from src.audio_preprocess import highpass_filter
+        audio = np.random.randn(SAMPLE_RATE).astype(np.float32)
+        result = highpass_filter(audio)
+        assert len(result) == len(audio)
+        assert result.dtype == np.float32
+
+    def test_removes_low_frequency(self):
+        from src.audio_preprocess import highpass_filter
+        # 20Hz 사인파 (cutoff 80Hz 이하)
+        t = np.arange(SAMPLE_RATE) / SAMPLE_RATE
+        low_freq = np.sin(2 * np.pi * 20 * t).astype(np.float32)
+        result = highpass_filter(low_freq, cutoff_hz=80)
+        # 에너지가 크게 감소해야 함
+        assert np.std(result) < np.std(low_freq) * 0.3
+
+
+class TestReduceNoise:
+    def test_output_same_length(self):
+        from src.audio_preprocess import reduce_noise
+        audio = np.random.randn(SAMPLE_RATE).astype(np.float32) * 0.01
+        result = reduce_noise(audio)
+        assert len(result) == len(audio)
+        assert result.dtype == np.float32
+
+
+class TestTrimSilence:
+    def test_trims_leading_silence(self):
+        from src.audio_preprocess import trim_silence
+        # 1초 무음 + 1초 신호 + 1초 무음
+        audio = np.zeros(SAMPLE_RATE * 3, dtype=np.float32)
+        audio[SAMPLE_RATE:SAMPLE_RATE * 2] = 0.5
+        trimmed, offset = trim_silence(audio)
+        assert len(trimmed) < len(audio)
+        assert offset > 0
+
+    def test_all_silence_returns_original(self):
+        from src.audio_preprocess import trim_silence
+        audio = np.zeros(SAMPLE_RATE, dtype=np.float32)
+        trimmed, offset = trim_silence(audio)
+        assert len(trimmed) == SAMPLE_RATE
+        assert offset == 0
+
+    def test_returns_offset_in_samples(self):
+        from src.audio_preprocess import trim_silence
+        audio = np.zeros(SAMPLE_RATE * 2, dtype=np.float32)
+        audio[SAMPLE_RATE:] = 0.5  # 후반부에만 신호
+        _, offset = trim_silence(audio)
+        assert isinstance(offset, (int, np.integer))
+        assert offset > 0
+
+
+class TestNormalizePeak:
+    def test_normalizes_to_target(self):
+        from src.audio_preprocess import normalize_peak
+        audio = np.array([0.1, -0.2, 0.3], dtype=np.float32)
+        result = normalize_peak(audio, target_peak=0.95)
+        assert np.max(np.abs(result)) == pytest.approx(0.95, abs=0.01)
+
+    def test_silent_audio_unchanged(self):
+        from src.audio_preprocess import normalize_peak
+        audio = np.zeros(100, dtype=np.float32)
+        result = normalize_peak(audio)
+        assert np.all(result == 0)
+
+    def test_output_dtype(self):
+        from src.audio_preprocess import normalize_peak
+        audio = np.array([0.5, -0.5], dtype=np.float32)
+        result = normalize_peak(audio)
+        assert result.dtype == np.float32
+
+
+class TestPreprocess:
+    def test_returns_tuple(self):
+        from src.audio_preprocess import preprocess
+        audio = np.random.randn(SAMPLE_RATE * 2).astype(np.float32) * 0.3
+        with patch("src.audio_preprocess.suppress_non_speech", side_effect=lambda a, **kw: a):
+            result = preprocess(audio)
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        assert isinstance(result[0], np.ndarray)
+        assert isinstance(result[1], int)
+
+    def test_vocal_separation_called_when_enabled(self):
+        from src.audio_preprocess import preprocess
+        audio = np.random.randn(SAMPLE_RATE).astype(np.float32) * 0.3
+        with patch("src.audio_preprocess.separate_vocals", return_value=audio) as mock_sep, \
+             patch("src.audio_preprocess.suppress_non_speech", side_effect=lambda a, **kw: a):
+            preprocess(audio, use_vocal_separation=True)
+        mock_sep.assert_called_once()
+
+    def test_vocal_separation_skipped_by_default(self):
+        from src.audio_preprocess import preprocess
+        audio = np.random.randn(SAMPLE_RATE).astype(np.float32) * 0.3
+        with patch("src.audio_preprocess.separate_vocals") as mock_sep, \
+             patch("src.audio_preprocess.suppress_non_speech", side_effect=lambda a, **kw: a):
+            preprocess(audio)
+        mock_sep.assert_not_called()
+
+
 class TestGetSpeechSegments:
     def test_returns_segments_in_seconds(self):
         """VAD 결과를 초 단위 세그먼트로 반환해야 한다."""
