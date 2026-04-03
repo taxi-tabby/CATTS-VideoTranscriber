@@ -47,8 +47,9 @@ jobs:
 
       - name: Inject version
         shell: bash
+        env:
+          VER: ${{ needs.version.outputs.tag }}
         run: |
-          VER=${{ needs.version.outputs.tag }}
           NUM=${VER#v}
           sed -i "s/^version = .*/version = \"${NUM}\"/" pyproject.toml
           sed -i "s/^APP_VERSION = .*/APP_VERSION = ${NUM}/" src/main.py
@@ -152,8 +153,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Inject version
+        env:
+          VER: ${{ needs.version.outputs.tag }}
         run: |
-          VER=${{ needs.version.outputs.tag }}
           NUM=${VER#v}
           sed -i "s/^version = .*/version = \"${NUM}\"/" pyproject.toml
           sed -i "s/^APP_VERSION = .*/APP_VERSION = ${NUM}/" src/main.py
@@ -246,8 +248,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Inject version
+        env:
+          VER: ${{ needs.version.outputs.tag }}
         run: |
-          VER=${{ needs.version.outputs.tag }}
           NUM=${VER#v}
           sed -i '' "s/^version = .*/version = \"${NUM}\"/" pyproject.toml
           sed -i '' "s/^APP_VERSION = .*/APP_VERSION = ${NUM}/" src/main.py
