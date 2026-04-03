@@ -85,7 +85,8 @@ def _estimate_num_speakers(
         return 1
 
     # k=2~max_speakers까지 silhouette score 비교
-    max_k = min(max_speakers, n)
+    # silhouette_score는 k < n 일 때만 유효 (k=n이면 각 샘플이 자체 클러스터)
+    max_k = min(max_speakers, n - 1)
     if max_k < 2:
         return 1
 
