@@ -152,6 +152,7 @@ class TranscriberWorker(QObject):
         max_speakers: int | None = None,
         whisper_workers: int = 1,
         diar_threads: int = 1,
+        skip_seconds: float = 0.0,
     ):
         super().__init__()
         self.video_path = video_path
@@ -164,6 +165,7 @@ class TranscriberWorker(QObject):
         self.max_speakers = max_speakers
         self.whisper_workers = whisper_workers
         self.diar_threads = diar_threads
+        self.skip_seconds = skip_seconds
         self._cancelled = False
 
     def cancel(self):
@@ -280,6 +282,14 @@ class TranscriberWorker(QObject):
             all_segments = []
             full_text_parts = []
             prev_text = ""
+
+            # 이어하기: skip_seconds 이전 청크는 건너뜀
+            skip_samples = int(self.skip_seconds * SAMPLE_RATE) if self.skip_seconds > 0 else 0
+            skip_sec = self.skip_seconds  # 세그먼트 필터링용
+            if skip_samples > 0:
+                skipped = sum(1 for cs in range(0, total_samples, CHUNK_SAMPLES)
+                              if min(cs + CHUNK_SAMPLES, total_samples) <= skip_samples)
+                self._log(f"이어하기: {self.skip_seconds:.1f}초 이전 청크 {skipped}개 건너뜀")
             transcribe_start = 22 if use_diar else 20
             transcribe_step = step_total
             lang_arg = self.language if self.language != "auto" else None
@@ -349,8 +359,12 @@ class TranscriberWorker(QObject):
                 chunk_metas = []
                 for chunk_start in range(0, total_samples, CHUNK_SAMPLES):
                     chunk_end = min(chunk_start + CHUNK_SAMPLES, total_samples)
+                    # 이어하기: 이미 변환된 청크 건너뜀
+                    if skip_samples > 0 and chunk_end <= skip_samples:
+                        continue
                     chunk_metas.append((chunk_start, chunk_end))
 
+                total_chunks = len(chunk_metas)  # 스킵 후 실제 처리할 청크 수
                 results_buf = {}
                 completed = 0
                 failed_chunks = []
@@ -483,7 +497,7 @@ class TranscriberWorker(QObject):
                                  "word": w.get("word", "")}
                                 for w in seg["words"]
                             ]
-                        if adjusted["text"]:
+                        if adjusted["text"] and adjusted["end"] > skip_sec:
                             all_segments.append(adjusted)
 
                     if diarization_segments:
@@ -496,14 +510,22 @@ class TranscriberWorker(QObject):
                         self.segment_ready.emit(seg)
             else:
                 # ── 싱글스레드: 순차 처리 (이전 청크 컨텍스트 활용) ──
+                # 이어하기: 스킵 후 실제 처리할 청크 목록 생성
+                single_chunks = []
+                for chunk_start in range(0, total_samples, CHUNK_SAMPLES):
+                    chunk_end = min(chunk_start + CHUNK_SAMPLES, total_samples)
+                    if skip_samples > 0 and chunk_end <= skip_samples:
+                        continue
+                    single_chunks.append((chunk_start, chunk_end))
+                total_chunks = len(single_chunks)
+
                 self._log(f"텍스트 변환 시작 (총 {total_chunks}개 청크, 언어: {self.language})")
 
-                for chunk_idx, chunk_start in enumerate(range(0, total_samples, CHUNK_SAMPLES)):
+                for chunk_idx, (chunk_start, chunk_end) in enumerate(single_chunks):
                     if self._cancelled:
                         self._log(f"취소됨 — {chunk_idx}/{total_chunks} 청크 완료분 보존")
                         break
 
-                    chunk_end = min(chunk_start + CHUNK_SAMPLES, total_samples)
                     chunk = audio[chunk_start:chunk_end]
 
                     time_offset = chunk_start / SAMPLE_RATE
@@ -566,7 +588,7 @@ class TranscriberWorker(QObject):
                                  "word": w.get("word", "")}
                                 for w in seg["words"]
                             ]
-                        if adjusted["text"]:
+                        if adjusted["text"] and adjusted["end"] > skip_sec:
                             all_segments.append(adjusted)
 
                     # 이 청크의 세그먼트에 화자 매칭
@@ -593,9 +615,6 @@ class TranscriberWorker(QObject):
 
             if self._cancelled and all_segments:
                 # 취소되었지만 완료된 결과가 있으면 부분 결과로 저장
-                if diarization_segments:
-                    from src.diarizer import map_speaker_labels
-                    all_segments = map_speaker_labels(all_segments)
                 self._log(f"취소됨 — 부분 결과 저장: {len(all_segments)}개 세그먼트, 소요시간: {elapsed:.1f}초")
                 self.finished.emit({
                     "filename": os.path.basename(self.video_path),
@@ -613,10 +632,6 @@ class TranscriberWorker(QObject):
                 self._log("취소됨 — 저장할 결과 없음")
                 self.error.emit("사용자가 변환을 취소했습니다.")
                 return
-
-            if diarization_segments:
-                from src.diarizer import map_speaker_labels
-                all_segments = map_speaker_labels(all_segments)
 
             self._log(f"변환 완료! 총 {len(all_segments)}개 세그먼트, 소요시간: {elapsed:.1f}초")
             self.progress.emit(100, "완료!")

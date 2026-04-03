@@ -776,6 +776,8 @@ class MainWindow(QMainWindow):
         self._live_item = None          # 변환 중 목록 항목 (QTreeWidgetItem)
         self._live_filename = ""        # 변환 중 파일명
         self._live_segments = []        # 변환 중 세그먼트 누적
+        self._pending_tid = None        # 점진적 저장용 DB ID
+        self._seg_buffer = []           # DB 저장 대기 세그먼트 버퍼
         self._last_progress_msg = ""    # 마지막 진행 메시지 (경과 시간 표시용)
         self._elapsed_timer = QTimer()  # 경과 시간 갱신 타이머
         self._elapsed_timer.setInterval(1000)
@@ -803,8 +805,75 @@ class MainWindow(QMainWindow):
         if get_show_startup_guide():
             QTimer.singleShot(0, self._show_startup_guide)
 
+        # 미완료 변환 감지 (크래시 복구)
+        QTimer.singleShot(500, self._check_incomplete)
+
     def _show_startup_guide(self):
         StartupGuideDialog(self).exec()
+
+    # ── 미완료 변환 복구 ──
+
+    def _check_incomplete(self):
+        """앱 시작 시 미완료 변환을 감지하고 이어하기를 제안한다."""
+        incompletes = self.db.get_incomplete_transcriptions()
+        if not incompletes:
+            return
+
+        # 세그먼트가 있는 미완료 항목만 (빈 레코드는 정리)
+        resumable = []
+        for item in incompletes:
+            if item["seg_count"] > 0 and os.path.exists(item["filepath"]):
+                resumable.append(item)
+            elif item["seg_count"] == 0:
+                self.db.delete_empty_transcription(item["id"])
+
+        if not resumable:
+            self._load_list()  # 빈 레코드 삭제 후 새로고침
+            return
+
+        # 다이얼로그: 이어하기 / 부분 결과 유지 / 삭제
+        for item in resumable:
+            m, s = divmod(int(item["last_end"]), 60)
+            time_str = f"{m}분 {s}초" if m > 0 else f"{s}초"
+            reply = QMessageBox.question(
+                self,
+                "미완료 변환 발견",
+                f"'{item['filename']}'의 변환이 완료되지 않았습니다.\n"
+                f"({item['seg_count']}개 세그먼트, {time_str}까지 변환됨)\n\n"
+                f"이어서 변환하시겠습니까?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._resume_transcription(item)
+
+    def _resume_transcription(self, item: dict):
+        """미완료 레코드를 이어서 변환한다."""
+        settings_dialog = TranscriptionSettingsDialog(self)
+        # 이전 설정 복원
+        if item.get("model_name"):
+            idx = settings_dialog.combo_model.findData(item["model_name"])
+            if idx >= 0:
+                settings_dialog.combo_model.setCurrentIndex(idx)
+        if item.get("language"):
+            idx = settings_dialog.combo_lang.findData(item["language"])
+            if idx >= 0:
+                settings_dialog.combo_lang.setCurrentIndex(idx)
+
+        if settings_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        settings = settings_dialog.get_settings()
+        hf_token = None
+        if settings["use_diarization"]:
+            hf_token = get_hf_token()
+            if not hf_token:
+                settings["use_diarization"] = False
+
+        self._start_transcription(
+            item["filepath"], settings, hf_token,
+            resume_tid=item["id"],
+            skip_seconds=item["last_end"],
+        )
 
     # ── 버전 확인 ──
 
@@ -1516,13 +1585,16 @@ class MainWindow(QMainWindow):
 
     # ── 변환 시작/대기열 (Feature 2) ──
 
-    def _start_transcription(self, video_path: str, settings: dict, hf_token: str | None = None):
+    def _start_transcription(
+        self, video_path: str, settings: dict, hf_token: str | None = None,
+        resume_tid: int | None = None, skip_seconds: float = 0.0,
+    ):
         self.btn_add.setEnabled(True)  # 대기열 추가를 위해 활성 유지
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.btn_cancel.setVisible(True)
         self.lbl_status.setVisible(True)
-        self.lbl_status.setText("준비 중...")
+        self.lbl_status.setText("이어하기 준비 중..." if resume_tid else "준비 중...")
 
         # 라이브 상태 초기화
         self._live_filename = os.path.basename(video_path)
@@ -1531,7 +1603,8 @@ class MainWindow(QMainWindow):
 
         # 목록 맨 위에 "변환 중" 항목 삽입
         self._live_item = QTreeWidgetItem()
-        self._live_item.setText(0, f"[ 변환 중 ] {self._live_filename}")
+        label = "이어하기" if resume_tid else "변환 중"
+        self._live_item.setText(0, f"[ {label} ] {self._live_filename}")
         self._live_item.setData(0, Qt.ItemDataRole.UserRole, None)
         self._live_item.setData(0, Qt.ItemDataRole.UserRole + 1, "live")
         self.tree_widget.insertTopLevelItem(0, self._live_item)
@@ -1539,7 +1612,7 @@ class MainWindow(QMainWindow):
 
         self._show_detail(True)
         self.lbl_title.setText(self._live_filename)
-        self.lbl_info.setText("변환 진행 중...")
+        self.lbl_info.setText("이어하기 진행 중..." if resume_tid else "변환 진행 중...")
         self.table_timeline.setRowCount(0)
         self.txt_fulltext.clear()
         self.txt_log.clear()
@@ -1551,6 +1624,18 @@ class MainWindow(QMainWindow):
 
         # 처리 로그 탭으로 전환
         self.tabs.setCurrentWidget(self.txt_log)
+
+        # 점진적 저장: 이어하기 시 기존 tid 재사용, 신규 시 새 레코드 생성
+        if resume_tid:
+            self._pending_tid = resume_tid
+        else:
+            self._pending_tid = self.db.begin_transcription(
+                filename=os.path.basename(video_path),
+                filepath=video_path,
+                model_name=settings.get("model_name"),
+                language=settings.get("language"),
+            )
+        self._seg_buffer = []
 
         self._thread = QThread()
         self._worker = TranscriberWorker(
@@ -1564,6 +1649,7 @@ class MainWindow(QMainWindow):
             max_speakers=settings.get("max_speakers"),
             whisper_workers=settings.get("whisper_workers", 1),
             diar_threads=settings.get("diar_threads", 1),
+            skip_seconds=skip_seconds,
         )
         self._worker.moveToThread(self._thread)
 
@@ -1602,8 +1688,24 @@ class MainWindow(QMainWindow):
             base_msg = base_msg.split(" ⏱")[0]
         self.lbl_status.setText(f"{base_msg} ⏱ {elapsed_str}")
 
+    def _flush_segments(self):
+        """버퍼에 쌓인 세그먼트를 DB에 저장한다."""
+        if self._pending_tid and self._seg_buffer:
+            try:
+                self.db.add_segments_batch(self._pending_tid, self._seg_buffer)
+                self._seg_buffer = []
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                print(f"[flush_segments] DB 저장 실패 ({len(self._seg_buffer)}개 버퍼 보존): {e}")
+
     def _on_segment_ready(self, seg: dict):
         self._live_segments.append(seg)
+
+        # 점진적 저장: 10개씩 묶어 DB에 저장
+        self._seg_buffer.append(seg)
+        if len(self._seg_buffer) >= 10:
+            self._flush_segments()
 
         # "변환 중" 항목을 보고 있을 때만 UI 직접 업데이트
         if self._is_viewing_live():
@@ -1649,15 +1751,35 @@ class MainWindow(QMainWindow):
         was_cancelled = self._cancelled_flag()
         self._cleanup_thread()
 
-        tid = self.db.add_transcription(
-            filename=result["filename"],
-            filepath=result["filepath"],
-            duration=result["duration"],
-            full_text=result["full_text"],
-            segments=result["segments"],
-            model_name=result.get("model_name"),
-            language=result.get("language"),
-        )
+        try:
+            # 점진적 저장: 남은 버퍼 플러시 + 메타데이터 갱신
+            self._flush_segments()
+            tid = self._pending_tid
+            self._pending_tid = None
+
+            if tid:
+                # 취소 시 duration=0 유지 → 이어하기 대상으로 남김
+                duration = 0 if was_cancelled else result["duration"]
+                self.db.finalize_transcription(tid, result["full_text"], duration)
+                self.db.remap_speakers(tid)
+            else:
+                # fallback: 점진적 저장 실패 시 기존 방식
+                tid = self.db.add_transcription(
+                    filename=result["filename"],
+                    filepath=result["filepath"],
+                    duration=result["duration"],
+                    full_text=result["full_text"],
+                    segments=result["segments"],
+                    model_name=result.get("model_name"),
+                    language=result.get("language"),
+                )
+        except Exception as e:
+            # DB 저장 실패 시에도 UI 크래시 방지
+            tid = self._pending_tid or self._current_tid
+            self._pending_tid = None
+            import traceback
+            traceback.print_exc()
+
         self._current_tid = tid
 
         # "변환 중" 항목 제거
@@ -1673,7 +1795,7 @@ class MainWindow(QMainWindow):
         self.lbl_info.setText(f"길이: {dur}")
 
         # DB에서 세그먼트 재로드 (ID 포함)
-        data = self.db.get_transcription(tid)
+        data = self.db.get_transcription(tid) if tid else None
         if data:
             self._populate_timeline(data.get("segments", []))
             self.txt_fulltext.setPlainText(self._build_full_text(data.get("segments", [])))
@@ -1720,6 +1842,14 @@ class MainWindow(QMainWindow):
     def _on_error(self, message: str):
         self._cleanup_thread()
 
+        # 점진적 저장: 에러 시에도 부분 결과 보존
+        self._flush_segments()
+        tid = self._pending_tid
+        self._pending_tid = None
+        if tid:
+            self.db.remap_speakers(tid)
+            self.db.delete_empty_transcription(tid)
+
         # "변환 중" 항목 제거
         self._remove_live_item()
 
@@ -1730,6 +1860,10 @@ class MainWindow(QMainWindow):
         self._elapsed_timer.stop()
         self._process_start_time = None
         self._show_detail(False)
+
+        # 부분 결과가 있으면 목록 새로고침
+        if tid:
+            self._load_list()
 
         # 사용자 취소 메시지는 보고 대상이 아님
         if "취소" in message:
@@ -2019,6 +2153,12 @@ class MainWindow(QMainWindow):
                 return
             self._worker.cancel()
             self._cleanup_thread(wait_ms=5000)
+            # 스레드 종료 후 최종 플러시 (race condition 방지)
+            self._flush_segments()
+            if self._pending_tid:
+                self.db.remap_speakers(self._pending_tid)
+                self.db.delete_empty_transcription(self._pending_tid)
+                self._pending_tid = None
         self._elapsed_timer.stop()
         if self._tray_icon:
             self._tray_icon.hide()

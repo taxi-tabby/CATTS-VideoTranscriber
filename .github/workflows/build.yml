@@ -45,6 +45,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Inject version
+        shell: bash
+        env:
+          VER: ${{ needs.version.outputs.tag }}
+        run: |
+          NUM=${VER#v}
+          sed -i "s/^version = .*/version = \"${NUM}\"/" pyproject.toml
+          sed -i "s/^APP_VERSION = .*/APP_VERSION = ${NUM}/" src/main.py
+
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -143,6 +152,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Inject version
+        env:
+          VER: ${{ needs.version.outputs.tag }}
+        run: |
+          NUM=${VER#v}
+          sed -i "s/^version = .*/version = \"${NUM}\"/" pyproject.toml
+          sed -i "s/^APP_VERSION = .*/APP_VERSION = ${NUM}/" src/main.py
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -229,6 +246,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Inject version
+        env:
+          VER: ${{ needs.version.outputs.tag }}
+        run: |
+          NUM=${VER#v}
+          sed -i '' "s/^version = .*/version = \"${NUM}\"/" pyproject.toml
+          sed -i '' "s/^APP_VERSION = .*/APP_VERSION = ${NUM}/" src/main.py
 
       - name: Install system dependencies
         run: brew install libsndfile

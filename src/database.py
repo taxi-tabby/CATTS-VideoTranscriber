@@ -107,6 +107,87 @@ class Database:
             self._set_version(version)
             self._conn.commit()
 
+    # ── 점진적 저장 (크래시 복구) ──
+
+    def begin_transcription(
+        self,
+        filename: str,
+        filepath: str,
+        model_name: str | None = None,
+        language: str | None = None,
+        folder_id: int | None = None,
+    ) -> int:
+        """변환 시작 시 빈 레코드를 생성한다. 세그먼트는 이후 점진적으로 추가."""
+        cur = self._conn.execute(
+            """INSERT INTO transcriptions
+               (filename, filepath, duration, created_at, full_text, model_name, language, display_name, folder_id)
+               VALUES (?, ?, 0, ?, '', ?, ?, ?, ?)""",
+            (filename, filepath, datetime.now().isoformat(), model_name, language, filename, folder_id),
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def add_segments_batch(self, tid: int, segments: list[dict]) -> None:
+        """세그먼트를 일괄 삽입한다."""
+        self._conn.executemany(
+            "INSERT INTO segments (transcription_id, start_time, end_time, text, speaker) VALUES (?, ?, ?, ?, ?)",
+            [(tid, s["start"], s["end"], s["text"], s.get("speaker")) for s in segments],
+        )
+        self._conn.commit()
+
+    def finalize_transcription(self, tid: int, full_text: str, duration: float) -> None:
+        """변환 완료 후 메타데이터를 갱신한다."""
+        self._conn.execute(
+            "UPDATE transcriptions SET full_text = ?, duration = ? WHERE id = ?",
+            (full_text, duration, tid),
+        )
+        self._conn.commit()
+
+    def remap_speakers(self, tid: int) -> None:
+        """pyannote 라벨(SPEAKER_00)을 한글 라벨(화자 1)로 일괄 변환."""
+        rows = self._conn.execute(
+            "SELECT speaker, MIN(start_time) as first_ts FROM segments "
+            "WHERE transcription_id = ? AND speaker IS NOT NULL "
+            "GROUP BY speaker ORDER BY first_ts",
+            (tid,),
+        ).fetchall()
+        if not rows:
+            return
+        label_map: dict[str, str] = {}
+        counter = 0
+        for row in rows:
+            raw = row[0]
+            if raw not in label_map:
+                counter += 1
+                label_map[raw] = f"화자 {counter}"
+        for raw, mapped in label_map.items():
+            if raw != mapped:
+                self._conn.execute(
+                    "UPDATE segments SET speaker = ? WHERE transcription_id = ? AND speaker = ?",
+                    (mapped, tid, raw),
+                )
+        self._conn.commit()
+
+    def delete_empty_transcription(self, tid: int) -> None:
+        """세그먼트가 없는 레코드를 삭제한다."""
+        count = self._conn.execute(
+            "SELECT COUNT(*) FROM segments WHERE transcription_id = ?", (tid,)
+        ).fetchone()[0]
+        if count == 0:
+            self._conn.execute("DELETE FROM transcriptions WHERE id = ?", (tid,))
+            self._conn.commit()
+
+    def get_incomplete_transcriptions(self) -> list[dict]:
+        """미완료(duration=0) 레코드를 반환한다. 각 항목에 last_end(마지막 세그먼트 종료 시각)를 포함."""
+        rows = self._conn.execute(
+            "SELECT t.id, t.filename, t.filepath, t.model_name, t.language, t.folder_id, "
+            "COALESCE(MAX(s.end_time), 0) as last_end, "
+            "COUNT(s.id) as seg_count "
+            "FROM transcriptions t LEFT JOIN segments s ON s.transcription_id = t.id "
+            "WHERE t.duration = 0 GROUP BY t.id"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     # ── 트랜스크립션 ──
 
     def add_transcription(
