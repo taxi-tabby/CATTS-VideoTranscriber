@@ -1369,6 +1369,7 @@ class MainWindow(QMainWindow):
             if idx >= 0:
                 self.tree_widget.takeTopLevelItem(idx)
             self._live_item = None
+            self.tree_widget.setEnabled(True)
 
     # ── 컨텍스트 메뉴 ──
 
@@ -1609,6 +1610,7 @@ class MainWindow(QMainWindow):
         self._live_item.setData(0, Qt.ItemDataRole.UserRole + 1, "live")
         self.tree_widget.insertTopLevelItem(0, self._live_item)
         self.tree_widget.setCurrentItem(self._live_item)
+        self.tree_widget.setEnabled(False)
 
         self._show_detail(True)
         self.lbl_title.setText(self._live_filename)
