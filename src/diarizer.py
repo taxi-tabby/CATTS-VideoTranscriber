@@ -22,6 +22,36 @@ class DiarizationCancelled(Exception):
     pass
 
 
+# ── 화자분리 프로파일 ──
+# 각 프로파일은 VAD, 세그먼트 후처리, 클러스터링 파라미터를 묶은 것.
+DIAR_PROFILES = {
+    "interview": {
+        "label": "인터뷰/대화",
+        "description": "깨끗한 음성 위주 (인터뷰, 팟캐스트, 강의)",
+        # VAD
+        "vad_threshold": 0.35,
+        # 세그먼트 후처리
+        "min_gap": 0.5,
+        "min_duration": 0.5,
+        "max_duration": 10.0,
+        # 클러스터링
+        "similarity_threshold": 0.7,
+    },
+    "noisy": {
+        "label": "영상/영화/노래",
+        "description": "배경음악, 효과음, 노래가 포함된 콘텐츠",
+        # VAD — 더 엄격하게 음성만 검출
+        "vad_threshold": 0.5,
+        # 세그먼트 후처리 — 더 공격적으로 병합
+        "min_gap": 1.0,
+        "min_duration": 1.0,
+        "max_duration": 15.0,
+        # 클러스터링 — 같은 화자로 판정하는 기준을 낮춤
+        "similarity_threshold": 0.55,
+    },
+}
+
+
 def _estimate_num_speakers(
     embeddings: np.ndarray,
     max_speakers: int = 10,
@@ -126,6 +156,7 @@ def _cluster_embeddings(
 
 def _extract_speech_segments(
     audio_path: str,
+    profile: dict,
     log_callback=None,
 ) -> list[dict]:
     """Silero VAD + 병합/분할로 화자분리용 음성 구간을 추출한다."""
@@ -140,15 +171,19 @@ def _extract_speech_segments(
     if log_callback:
         log_callback(f"VAD 입력: {len(audio) / sr:.1f}초")
 
-    segments = get_speech_segments(audio)
+    segments = get_speech_segments(audio, threshold=profile["vad_threshold"])
     if log_callback:
         log_callback(f"VAD 검출: {len(segments)}개 구간")
 
-    segments = merge_speech_segments(segments, min_gap=0.5, min_duration=0.5)
+    segments = merge_speech_segments(
+        segments,
+        min_gap=profile["min_gap"],
+        min_duration=profile["min_duration"],
+    )
     if log_callback:
         log_callback(f"병합 후: {len(segments)}개 구간")
 
-    segments = split_long_segments(segments, max_duration=10.0)
+    segments = split_long_segments(segments, max_duration=profile["max_duration"])
     if log_callback:
         log_callback(f"분할 후: {len(segments)}개 구간")
 
@@ -236,6 +271,7 @@ def run_diarization(
     cancel_check=None,
     log_callback=None,
     num_threads: int = 1,
+    profile_name: str = "interview",
 ) -> list[dict]:
     """Silero VAD + pyannote 임베딩 + 클러스터링으로 화자 분리 실행.
 
@@ -246,6 +282,7 @@ def run_diarization(
             percent는 0~100 범위이며, 호출측에서 전체 진행률에 매핑해야 한다.
         cancel_check: () -> bool 형태. True를 반환하면 취소.
         log_callback: (message: str) 형태. 상세 로그 출력.
+        profile_name: 화자분리 프로파일 ("interview" 또는 "noisy").
     """
 
     def _log(msg: str):
@@ -255,6 +292,9 @@ def run_diarization(
     def _progress(pct: int, msg: str):
         if progress_callback:
             progress_callback(pct, msg)
+
+    profile = DIAR_PROFILES.get(profile_name, DIAR_PROFILES["interview"])
+    _log(f"화자분리 프로파일: {profile['label']}")
 
     _progress(0, "화자 분석 시작...")
     diar_start_time = time.time()
@@ -283,7 +323,7 @@ def run_diarization(
         raise RuntimeError("사용자가 화자 분석을 취소했습니다.")
 
     _progress(5, "화자 분석: 음성 구간 검출 중...")
-    segments = _extract_speech_segments(audio_path, log_callback=_log)
+    segments = _extract_speech_segments(audio_path, profile=profile, log_callback=_log)
 
     if not segments:
         _log("음성 구간이 검출되지 않았습니다.")
@@ -328,6 +368,7 @@ def run_diarization(
             embeddings,
             max_speakers=effective_max,
             min_speakers=effective_min,
+            similarity_threshold=profile["similarity_threshold"],
         )
         _log(f"화자 수 추정: {k}명 (silhouette 기반)")
 
