@@ -1,6 +1,5 @@
 import gc
 import os
-import threading
 import time
 from collections import defaultdict
 
@@ -10,15 +9,12 @@ import torch
 
 # 화자 분석 내부 단계 → (한글 표시, 진행률 범위 내 비율)
 _DIAR_STEPS = {
-    "segmentation": ("음성 구간 분할", 0.3),
-    "speaker_counting": ("화자 수 추정", 0.1),
-    "embeddings": ("화자 특징 추출", 0.4),
-    "discrete_diarization": ("화자 할당", 0.2),
+    "vad": ("음성 구간 검출", 0.15),
+    "embeddings": ("화자 특징 추출", 0.55),
+    "clustering": ("화자 클러스터링", 0.30),
 }
 
 _DIAR_STEP_ORDER = list(_DIAR_STEPS.keys())
-
-# 화자 분석 타임아웃 없음 — 오래 걸려도 완수해야 함.
 
 
 class DiarizationCancelled(Exception):
@@ -128,6 +124,108 @@ def _cluster_embeddings(
     ]
 
 
+def _extract_speech_segments(
+    audio_path: str,
+    log_callback=None,
+) -> list[dict]:
+    """Silero VAD + 병합/분할로 화자분리용 음성 구간을 추출한다."""
+    import soundfile as sf
+    from src.audio_preprocess import (
+        get_speech_segments,
+        merge_speech_segments,
+        split_long_segments,
+    )
+
+    audio, sr = sf.read(audio_path, dtype="float32")
+    if log_callback:
+        log_callback(f"VAD 입력: {len(audio) / sr:.1f}초")
+
+    segments = get_speech_segments(audio)
+    if log_callback:
+        log_callback(f"VAD 검출: {len(segments)}개 구간")
+
+    segments = merge_speech_segments(segments, min_gap=0.5, min_duration=0.5)
+    if log_callback:
+        log_callback(f"병합 후: {len(segments)}개 구간")
+
+    segments = split_long_segments(segments, max_duration=10.0)
+    if log_callback:
+        log_callback(f"분할 후: {len(segments)}개 구간")
+
+    return segments
+
+
+def _extract_embeddings(
+    audio_path: str,
+    segments: list[dict],
+    hf_token: str,
+    device: torch.device,
+    batch_size: int = 32,
+    log_callback=None,
+    progress_callback=None,
+    cancel_check=None,
+) -> np.ndarray:
+    """pyannote 임베딩 모델로 각 구간의 화자 특징 벡터를 추출한다.
+
+    Returns:
+        (N, D) 형태의 numpy 배열. N=세그먼트 수, D=임베딩 차원.
+    """
+    os.environ["HF_TOKEN"] = hf_token
+
+    from pyannote.audio import Audio
+    from pyannote.core import Segment
+    from pyannote.audio.pipelines.speaker_verification import PretrainedSpeakerEmbedding
+
+    if log_callback:
+        log_callback("임베딩 모델 로드 중...")
+
+    model = PretrainedSpeakerEmbedding(
+        "pyannote/wespeaker-voxceleb-resnet34-LM",
+        device=device,
+    )
+    audio_io = Audio(sample_rate=16000, mono="downmix")
+
+    if log_callback:
+        log_callback(f"임베딩 추출 시작: {len(segments)}개 구간, batch_size={batch_size}")
+
+    all_embeddings = []
+    for batch_start in range(0, len(segments), batch_size):
+        if cancel_check and cancel_check():
+            raise DiarizationCancelled("사용자가 화자 분석을 취소했습니다.")
+
+        batch_segs = segments[batch_start:batch_start + batch_size]
+
+        # 배치 내 가장 긴 구간에 맞춰 패딩
+        waveforms = []
+        for seg in batch_segs:
+            waveform, _ = audio_io.crop(audio_path, Segment(seg["start"], seg["end"]))
+            waveforms.append(waveform.squeeze(0))  # (num_samples,)
+
+        max_len = max(w.shape[0] for w in waveforms)
+        padded = torch.zeros(len(waveforms), 1, max_len)
+        for i, w in enumerate(waveforms):
+            padded[i, 0, :w.shape[0]] = w
+
+        with torch.inference_mode():
+            emb = model(padded.to(device))  # (batch_size, D)
+        all_embeddings.append(emb)
+
+        if progress_callback:
+            done = min(batch_start + batch_size, len(segments))
+            progress_callback(done, len(segments))
+
+        if log_callback:
+            done = min(batch_start + batch_size, len(segments))
+            log_callback(f"임베딩 추출: {done}/{len(segments)}")
+
+    del model
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return np.vstack(all_embeddings)
+
+
 def run_diarization(
     audio_path: str,
     hf_token: str,
@@ -139,7 +237,9 @@ def run_diarization(
     log_callback=None,
     num_threads: int = 1,
 ) -> list[dict]:
-    """pyannote.audio로 화자 분리 실행. 결과는 [{start, end, speaker}, ...] 리스트.
+    """Silero VAD + pyannote 임베딩 + 클러스터링으로 화자 분리 실행.
+
+    결과는 [{start, end, speaker}, ...] 리스트.
 
     Args:
         progress_callback: (percent: int, message: str) 형태의 콜백.
@@ -152,27 +252,14 @@ def run_diarization(
         if log_callback:
             log_callback(msg)
 
-    # HF_TOKEN 환경변수로 토큰 전달 — huggingface_hub가 자동으로 읽음.
-    os.environ["HF_TOKEN"] = hf_token
+    def _progress(pct: int, msg: str):
+        if progress_callback:
+            progress_callback(pct, msg)
 
-    if progress_callback:
-        progress_callback(0, "화자 분리 모델 로드 중...")
+    _progress(0, "화자 분석 시작...")
+    diar_start_time = time.time()
 
-    from pyannote.audio import Pipeline
-
-    _log("pyannote Pipeline 로드 시작...")
-    pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-3.1",
-    )
-
-    if pipeline is None:
-        raise RuntimeError(
-            "화자 분리 모델을 불러올 수 없습니다.\n"
-            "1. HuggingFace 토큰이 유효한지 확인하세요.\n"
-            "2. https://hf.co/pyannote/speaker-diarization-3.1 에서 라이선스에 동의했는지 확인하세요.\n"
-            "3. https://hf.co/pyannote/segmentation-3.0 에서도 라이선스에 동의해야 합니다."
-        )
-
+    # ── 디바이스 및 배치 크기 설정 ──
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     _log(f"화자 분석 디바이스: {device}")
 
@@ -180,199 +267,83 @@ def run_diarization(
         gpu_name = torch.cuda.get_device_name(0)
         gpu_mem = torch.cuda.get_device_properties(0).total_mem / (1024 ** 3)
         _log(f"GPU: {gpu_name} ({gpu_mem:.1f}GB)")
-        # GPU VRAM에 따라 batch_size 결정
-        if gpu_mem >= 8:
-            batch_size = 64
-        elif gpu_mem >= 4:
-            batch_size = 32
-        else:
-            batch_size = 16
+        batch_size = 64 if gpu_mem >= 8 else (32 if gpu_mem >= 4 else 16)
     else:
-        # CPU: 코어 수 기반 batch_size (너무 크면 메모리 부족)
-        cpu_count = os.cpu_count() or 4
         if num_threads > 1:
-            thread_count = num_threads
-            batch_size = min(max(thread_count, 8), 32)
-        else:
-            thread_count = 1
-            batch_size = 8
-        torch.set_num_threads(thread_count)
-        try:
-            torch.set_num_interop_threads(min(thread_count, 4))
-        except RuntimeError:
-            pass  # 이미 설정된 경우 무시
-        _log(f"CPU 코어: {cpu_count}개, torch 스레드: {thread_count}")
+            torch.set_num_threads(num_threads)
+            try:
+                torch.set_num_interop_threads(min(num_threads, 4))
+            except RuntimeError:
+                pass
+        batch_size = 8
+        _log(f"CPU torch 스레드: {num_threads}")
 
-    # batch_size 적용
-    try:
-        pipeline.segmentation.batch_size = batch_size
-        _log(f"segmentation batch_size = {batch_size}")
-    except Exception:
-        pass
-    try:
-        pipeline.embedding.batch_size = batch_size
-        _log(f"embedding batch_size = {batch_size}")
-    except Exception:
-        pass
+    # ── Step 1: VAD — 음성 구간 검출 ──
+    if cancel_check and cancel_check():
+        raise RuntimeError("사용자가 화자 분석을 취소했습니다.")
 
-    pipeline.to(device)
+    _progress(5, "화자 분석: 음성 구간 검출 중...")
+    segments = _extract_speech_segments(audio_path, log_callback=_log)
 
-    if progress_callback:
-        progress_callback(10, "화자 분석 시작...")
+    if not segments:
+        _log("음성 구간이 검출되지 않았습니다.")
+        _progress(100, "화자 분석 완료")
+        return []
 
-    kwargs = {}
+    _progress(15, f"화자 분석: {len(segments)}개 음성 구간 검출")
+
+    # ── Step 2: 임베딩 추출 ──
+    if cancel_check and cancel_check():
+        raise RuntimeError("사용자가 화자 분석을 취소했습니다.")
+
+    def _emb_progress(done: int, total: int):
+        pct = 15 + int(55 * done / total)
+        _progress(pct, f"화자 분석: 화자 특징 추출 [{done}/{total}]")
+
+    embeddings = _extract_embeddings(
+        audio_path, segments, hf_token,
+        device=device,
+        batch_size=batch_size,
+        log_callback=_log,
+        progress_callback=_emb_progress,
+        cancel_check=cancel_check,
+    )
+
+    elapsed = time.time() - diar_start_time
+    _log(f"임베딩 추출 완료 ({int(elapsed)}초)")
+
+    # ── Step 3: 클러스터링 ──
+    if cancel_check and cancel_check():
+        raise RuntimeError("사용자가 화자 분석을 취소했습니다.")
+
+    _progress(75, "화자 분석: 화자 클러스터링 중...")
+
     if num_speakers is not None:
-        kwargs["num_speakers"] = num_speakers
+        k = num_speakers
+        _log(f"화자 수 지정: {k}명")
     else:
-        if min_speakers is not None:
-            kwargs["min_speakers"] = min_speakers
-        if max_speakers is not None:
-            kwargs["max_speakers"] = max_speakers
-
-    # pyannote hook으로 진행률 보고 + 취소 체크
-    completed_pct = 10
-    diar_start_time = time.time()
-    current_step_name = "시작"  # 현재 진행 중인 단계 (heartbeat용)
-    current_chunk_info = ""  # 청크 진행 정보 (heartbeat용)
-    step_lock = threading.Lock()
-
-    def _hook(step_name, step_artefact, *args, completed=None, total=None, **kw):
-        nonlocal completed_pct, current_step_name, current_chunk_info
-
-        # 취소 체크 — hook은 단계 사이에 호출되므로 여기서 취소 가능
-        if cancel_check and cancel_check():
-            raise DiarizationCancelled("사용자가 화자 분석을 취소했습니다.")
-
-        step_info = _DIAR_STEPS.get(step_name)
-        if not step_info or not progress_callback:
-            return
-        label, ratio = step_info
-        step_idx = _DIAR_STEP_ORDER.index(step_name)
-        elapsed = time.time() - diar_start_time
-
-        # 청크 진행률 계산
-        chunk_str = ""
-        if total and total > 0 and completed is not None:
-            chunk_str = f" [{completed}/{total}]"
-
-        # 이전 단계까지의 누적 + 현재 단계 내 청크 진행률 반영
-        prev_pct = sum(
-            r for name, (_, r) in _DIAR_STEPS.items()
-            if _DIAR_STEP_ORDER.index(name) < step_idx
+        effective_max = max_speakers if max_speakers is not None else 10
+        effective_min = min_speakers if min_speakers is not None else 1
+        k = _estimate_num_speakers(
+            embeddings,
+            max_speakers=effective_max,
+            min_speakers=effective_min,
         )
-        chunk_fraction = (completed / total) if (total and total > 0 and completed is not None) else 1.0
-        completed_pct = 10 + int(90 * (prev_pct + ratio * chunk_fraction))
-        completed_pct = min(completed_pct, 95)
+        _log(f"화자 수 추정: {k}명 (silhouette 기반)")
 
-        elapsed_str = f" ({int(elapsed)}초 경과)"
-        with step_lock:
-            current_step_name = label
-            current_chunk_info = chunk_str
-
-        progress_callback(completed_pct, f"화자 분석: {label}{chunk_str}{elapsed_str}")
-        _log(f"화자 분석: {label}{chunk_str} ({int(elapsed)}초)")
-
-        # GPU 메모리 상태 로깅
-        if device.type == "cuda":
-            mem_used = torch.cuda.memory_allocated() / (1024 ** 3)
-            mem_reserved = torch.cuda.memory_reserved() / (1024 ** 3)
-            _log(f"  GPU 메모리: {mem_used:.2f}GB 사용 / {mem_reserved:.2f}GB 예약")
-
-    kwargs["hook"] = _hook
-
-    # ── pipeline을 별도 스레드에서 실행하여 heartbeat + 취소 + 타임아웃 구현 ──
-    result_container = [None]
-    error_container = [None]
-    done_event = threading.Event()
-
-    def _run_pipeline():
-        try:
-            with torch.inference_mode():
-                result_container[0] = pipeline(audio_path, **kwargs)
-        except DiarizationCancelled as e:
-            error_container[0] = e
-        except Exception as e:
-            error_container[0] = e
-        finally:
-            done_event.set()
-
-    pipeline_thread = threading.Thread(target=_run_pipeline, daemon=True)
-    pipeline_thread.start()
-
-    # 메인 루프: 주기적으로 heartbeat, 취소 체크, 타임아웃 체크
-    heartbeat_interval = 10  # 10초마다 상태 보고
-    last_heartbeat = time.time()
-
-    while not done_event.wait(timeout=2):
-        elapsed = time.time() - diar_start_time
-
-        # 취소 체크
-        if cancel_check and cancel_check():
-            _log("사용자 취소 요청 감지 — 현재 단계 완료 후 중단됩니다.")
-            # hook에서 예외가 발생할 때까지 대기 (최대 30초)
-            done_event.wait(timeout=30)
-            if not done_event.is_set():
-                _log("경고: 화자 분석 스레드가 응답하지 않아 강제 중단합니다.")
-            raise RuntimeError("사용자가 화자 분석을 취소했습니다.")
-
-        # Heartbeat: 주기적으로 진행 상태 보고
-        now = time.time()
-        if now - last_heartbeat >= heartbeat_interval:
-            last_heartbeat = now
-            with step_lock:
-                step = current_step_name
-                chunk_info = current_chunk_info
-            elapsed_m, elapsed_s = divmod(int(elapsed), 60)
-            if elapsed_m > 0:
-                elapsed_str = f"{elapsed_m}분 {elapsed_s}초"
-            else:
-                elapsed_str = f"{elapsed_s}초"
-            heartbeat_msg = f"화자 분석: {step}{chunk_info} 처리 중... ({elapsed_str} 경과)"
-            if progress_callback:
-                progress_callback(completed_pct, heartbeat_msg)
-            _log(f"[heartbeat] {step}{chunk_info} 진행 중 ({elapsed_str})")
-
-            # GPU 메모리 상태
-            if device.type == "cuda":
-                mem_used = torch.cuda.memory_allocated() / (1024 ** 3)
-                _log(f"  GPU 메모리 사용: {mem_used:.2f}GB")
-
-    # 완료 후 에러 체크
-    if error_container[0] is not None:
-        err = error_container[0]
-        if isinstance(err, DiarizationCancelled):
-            raise RuntimeError(str(err))
-        raise err
-
-    diarization = result_container[0]
-    if diarization is None:
-        raise RuntimeError("화자 분석 결과가 비어 있습니다.")
+    result = _cluster_embeddings(embeddings, segments, num_speakers=k)
 
     elapsed_total = time.time() - diar_start_time
-    _log(f"화자 분석 pipeline 완료 ({int(elapsed_total)}초)")
+    _log(f"화자 분석 완료: {len(result)}개 구간, {k}명 화자 ({int(elapsed_total)}초)")
+    _progress(100, "화자 분석 완료")
 
-    segments = []
-    for turn, _, speaker in diarization.itertracks(yield_label=True):
-        segments.append({
-            "start": turn.start,
-            "end": turn.end,
-            "speaker": speaker,
-        })
-
-    _log(f"화자 분석 결과: {len(segments)}개 구간, "
-         f"{len(set(s['speaker'] for s in segments))}명 화자 검출")
-
-    if progress_callback:
-        progress_callback(100, "화자 분석 완료")
-
-    # 모델 해제 — GPU 메모리 확보
-    del pipeline
+    # GPU 메모리 해제
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         _log("GPU 메모리 해제 완료")
 
-    return segments
+    return result
 
 
 def _find_speaker_at(sorted_dsegs: list[dict], dstarts: list[float],

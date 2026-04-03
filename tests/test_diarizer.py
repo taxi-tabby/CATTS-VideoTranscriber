@@ -1,5 +1,6 @@
 import pytest
 import numpy as np
+from unittest.mock import patch, MagicMock
 from src.diarizer import assign_speakers, map_speaker_labels
 
 
@@ -215,3 +216,73 @@ class TestClusterEmbeddings:
         result = _cluster_embeddings(embeddings, segments, num_speakers=1)
         speakers = set(r["speaker"] for r in result)
         assert len(speakers) == 1
+
+
+class TestRunDiarization:
+    def test_returns_segments_with_speaker_labels(self):
+        """run_diarization()이 [{start, end, speaker}, ...] 형식을 반환해야 한다."""
+        from src.diarizer import run_diarization
+
+        fake_segments = [
+            {"start": 0.0, "end": 3.0},
+            {"start": 5.0, "end": 8.0},
+            {"start": 10.0, "end": 13.0},
+        ]
+        fake_embeddings = np.random.randn(3, 256).astype(np.float32)
+
+        with patch("src.diarizer._extract_speech_segments", return_value=fake_segments), \
+             patch("src.diarizer._extract_embeddings", return_value=fake_embeddings), \
+             patch("src.diarizer._estimate_num_speakers", return_value=1), \
+             patch("src.diarizer._cluster_embeddings") as mock_cluster:
+
+            mock_cluster.return_value = [
+                {"start": 0.0, "end": 3.0, "speaker": "SPEAKER_00"},
+                {"start": 5.0, "end": 8.0, "speaker": "SPEAKER_00"},
+                {"start": 10.0, "end": 13.0, "speaker": "SPEAKER_00"},
+            ]
+
+            result = run_diarization(
+                audio_path="dummy.wav",
+                hf_token="dummy_token",
+            )
+
+        assert len(result) == 3
+        assert all("start" in r and "end" in r and "speaker" in r for r in result)
+        assert all(r["speaker"] == "SPEAKER_00" for r in result)
+
+    def test_num_speakers_skips_estimation(self):
+        """num_speakers가 지정되면 _estimate_num_speakers를 호출하지 않아야 한다."""
+        from src.diarizer import run_diarization
+
+        fake_segments = [{"start": 0.0, "end": 5.0}]
+        fake_embeddings = np.random.randn(1, 256).astype(np.float32)
+
+        with patch("src.diarizer._extract_speech_segments", return_value=fake_segments), \
+             patch("src.diarizer._extract_embeddings", return_value=fake_embeddings), \
+             patch("src.diarizer._estimate_num_speakers") as mock_estimate, \
+             patch("src.diarizer._cluster_embeddings") as mock_cluster:
+
+            mock_cluster.return_value = [
+                {"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"},
+            ]
+
+            run_diarization(
+                audio_path="dummy.wav",
+                hf_token="dummy_token",
+                num_speakers=2,
+            )
+
+        mock_estimate.assert_not_called()
+        mock_cluster.assert_called_once()
+
+    def test_empty_segments_returns_empty(self):
+        """음성 구간이 없으면 빈 리스트를 반환해야 한다."""
+        from src.diarizer import run_diarization
+
+        with patch("src.diarizer._extract_speech_segments", return_value=[]):
+            result = run_diarization(
+                audio_path="dummy.wav",
+                hf_token="dummy_token",
+            )
+
+        assert result == []
