@@ -1547,10 +1547,7 @@ class MainWindow(QMainWindow):
     # ── 키보드 단축키 ──
 
     def _setup_shortcuts(self):
-        QShortcut(QKeySequence("Ctrl+O"), self, self._on_add_video)
-        QShortcut(QKeySequence("Ctrl+S"), self, self._on_export)
-        QShortcut(QKeySequence("Ctrl+Shift+C"), self, self._on_copy)
-        QShortcut(QKeySequence("Delete"), self, self._on_delete)
+        # 메뉴바에 없는 단축키만 여기서 등록 (메뉴 항목은 메뉴에서 setShortcut)
         QShortcut(QKeySequence("Ctrl+F"), self, self._focus_timeline_search)
 
     def _focus_timeline_search(self):
@@ -1571,14 +1568,31 @@ class MainWindow(QMainWindow):
         act_add.triggered.connect(self._on_add_video)
 
         act_export = file_menu.addAction("내보내기...")
-        act_export.setShortcut("Ctrl+E")
+        act_export.setShortcut("Ctrl+S")
         act_export.triggered.connect(self._on_export)
+
+        file_menu.addSeparator()
+
+        act_delete = file_menu.addAction("선택 항목 삭제")
+        act_delete.setShortcut("Delete")
+        act_delete.triggered.connect(self._on_delete)
 
         file_menu.addSeparator()
 
         act_quit = file_menu.addAction("종료")
         act_quit.setShortcut("Ctrl+Q")
         act_quit.triggered.connect(self.close)
+
+        # ── 편집 ──
+        edit_menu = menubar.addMenu("편집")
+
+        act_copy = edit_menu.addAction("텍스트 복사")
+        act_copy.setShortcut("Ctrl+Shift+C")
+        act_copy.triggered.connect(self._on_copy)
+
+        act_search = edit_menu.addAction("타임라인 검색")
+        act_search.setShortcut("Ctrl+F")
+        act_search.triggered.connect(self._focus_timeline_search)
 
         # ── 도구 ──
         tools_menu = menubar.addMenu("도구")
@@ -1597,6 +1611,8 @@ class MainWindow(QMainWindow):
 
         act_guide = help_menu.addAction("시작 안내")
         act_guide.triggered.connect(self._show_startup_guide)
+
+        help_menu.addSeparator()
 
         act_about = help_menu.addAction("프로그램 정보")
         act_about.triggered.connect(self._show_about)
