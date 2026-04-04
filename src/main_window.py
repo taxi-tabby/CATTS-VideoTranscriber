@@ -1096,8 +1096,19 @@ class CorrectionDictDialog(QDialog):
             self.lbl_checksum.setText(f"체크섬: {cs[:16]}..." if len(cs) > 16 else f"체크섬: {cs}")
 
         entries = self.db.get_correction_entries(dict_id)
-        self.table_entries.setRowCount(len(entries))
-        for i, e in enumerate(entries):
+
+        # 고유 단어(화자+단어)별로 그룹화하여 UI에 표시
+        # DB에는 모든 등장 위치가 개별 행으로 있지만, UI에서는 1행만 표시
+        seen = {}  # (speaker, wrong) → row index
+        display_rows = []
+        for e in entries:
+            key = (e.get("speaker"), e["wrong"])
+            if key not in seen:
+                seen[key] = len(display_rows)
+                display_rows.append(e)
+
+        self.table_entries.setRowCount(len(display_rows))
+        for i, e in enumerate(display_rows):
             speaker_item = QTableWidgetItem(e.get("speaker") or "—")
             speaker_item.setFlags(speaker_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             wrong_item = QTableWidgetItem(e["wrong"])
@@ -1106,10 +1117,7 @@ class CorrectionDictDialog(QDialog):
             freq_item.setFlags(freq_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
 
             wrong_item.setData(Qt.ItemDataRole.UserRole, e["id"])
-            # 타임스탬프 등 메타데이터를 UserRole+1에 저장
             wrong_item.setData(Qt.ItemDataRole.UserRole + 1, {
-                "start_time": e.get("start_time"),
-                "end_time": e.get("end_time"),
                 "speaker": e.get("speaker"),
                 "frequency": e.get("frequency", 1),
                 "is_corrected": e.get("is_corrected", 0),
@@ -1305,25 +1313,51 @@ class CorrectionDictDialog(QDialog):
         dict_id = self._current_dict_id()
         if dict_id is None:
             return
-        entries = []
+
+        # UI에서 편집된 교정 매핑 수집: (speaker, wrong) → correct
+        correction_map = {}
         for row in range(self.table_entries.rowCount()):
             wrong_item = self.table_entries.item(row, 1)
-            wrong = (wrong_item.text() or "").strip()
-            correct = (self.table_entries.item(row, 2).text() or "").strip()
+            wrong = (wrong_item.text() if wrong_item else "").strip()
+            correct_item = self.table_entries.item(row, 2)
+            correct = (correct_item.text() if correct_item else "").strip()
             if not wrong or not correct:
                 continue
             meta = wrong_item.data(Qt.ItemDataRole.UserRole + 1) or {}
-            is_corrected = wrong != correct  # 교정 열이 다르면 교정된 것
-            entries.append({
-                "wrong": wrong,
-                "correct": correct,
-                "start_time": meta.get("start_time"),
-                "end_time": meta.get("end_time"),
-                "speaker": meta.get("speaker"),
-                "frequency": meta.get("frequency", 1),
-                "is_corrected": is_corrected,
-            })
-        self.db.replace_correction_entries(dict_id, entries)
+            key = (meta.get("speaker"), wrong)
+            correction_map[key] = correct
+
+        # DB의 모든 항목을 가져와서 교정 매핑 적용 (모든 등장 위치에 일괄)
+        all_entries = self.db.get_correction_entries(dict_id)
+        updated = []
+        for e in all_entries:
+            key = (e.get("speaker"), e["wrong"])
+            if key in correction_map:
+                e["correct"] = correction_map[key]
+                e["is_corrected"] = e["wrong"] != e["correct"]
+            updated.append(e)
+
+        # 수동 추가 항목 (DB에 없는 것) 처리
+        existing_keys = {(e.get("speaker"), e["wrong"]) for e in all_entries}
+        for row in range(self.table_entries.rowCount()):
+            wrong_item = self.table_entries.item(row, 1)
+            wrong = (wrong_item.text() if wrong_item else "").strip()
+            correct_item = self.table_entries.item(row, 2)
+            correct = (correct_item.text() if correct_item else "").strip()
+            if not wrong or not correct:
+                continue
+            meta = wrong_item.data(Qt.ItemDataRole.UserRole + 1) or {}
+            key = (meta.get("speaker"), wrong)
+            if key not in existing_keys:
+                updated.append({
+                    "wrong": wrong,
+                    "correct": correct,
+                    "speaker": meta.get("speaker"),
+                    "frequency": meta.get("frequency", 1),
+                    "is_corrected": wrong != correct,
+                })
+
+        self.db.replace_correction_entries(dict_id, updated)
         self._on_dict_selected(self.list_dicts.currentRow())
 
 

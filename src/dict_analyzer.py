@@ -140,32 +140,28 @@ def _analyze_worker(params: dict, msg_queue: mp.Queue, cancel_event: mp.Event) -
             for w in raw_words:
                 w["speaker"] = None
 
-        # ── 빈도 집계 (화자+단어 기준) ──
-        from collections import Counter
+        # ── 빈도 집계 + 모든 등장 위치 저장 ──
+        from collections import Counter, defaultdict
         freq_counter = Counter()
+        occurrences = defaultdict(list)  # (speaker, word) → [(start, end), ...]
         for w in raw_words:
             key = (w["speaker"], w["word"])
             freq_counter[key] += 1
+            occurrences[key].append((w["start"], w["end"]))
 
-        # 빈도 정보 + 첫 출현 타임스탬프
-        first_occurrence = {}
-        for w in raw_words:
-            key = (w["speaker"], w["word"])
-            if key not in first_occurrence:
-                first_occurrence[key] = w
-
+        # 각 등장 위치마다 1개 항목 생성 (UI에서는 빈도로 그룹화)
         word_entries = []
         for (speaker, word), count in freq_counter.most_common():
-            first = first_occurrence[(speaker, word)]
-            word_entries.append({
-                "word": word,
-                "start": first["start"],
-                "end": first["end"],
-                "speaker": speaker,
-                "frequency": count,
-            })
+            for start, end in occurrences[(speaker, word)]:
+                word_entries.append({
+                    "word": word,
+                    "start": start,
+                    "end": end,
+                    "speaker": speaker,
+                    "frequency": count,  # 총 등장 횟수 (모든 행에 동일)
+                })
 
-        _log(f"분석 완료: {len(word_entries)}개 고유 단어, {len(raw_words)}개 총 단어")
+        _log(f"분석 완료: {len(freq_counter)}개 고유 단어, {len(word_entries)}개 등장 위치")
         _progress(100, "분석 완료")
         msg_queue.put(("result", {"words": word_entries}))
 
