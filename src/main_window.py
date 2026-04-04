@@ -1506,7 +1506,67 @@ class MainWindow(QMainWindow):
 
     # ── UI 빌드 ──
 
+    def _build_menubar(self):
+        menubar = self.menuBar()
+
+        # ── 파일 ──
+        file_menu = menubar.addMenu("파일")
+
+        act_add = file_menu.addAction("미디어 파일 추가...")
+        act_add.setShortcut("Ctrl+O")
+        act_add.triggered.connect(self._on_add_video)
+
+        act_export = file_menu.addAction("내보내기...")
+        act_export.setShortcut("Ctrl+E")
+        act_export.triggered.connect(self._on_export)
+
+        file_menu.addSeparator()
+
+        act_quit = file_menu.addAction("종료")
+        act_quit.setShortcut("Ctrl+Q")
+        act_quit.triggered.connect(self.close)
+
+        # ── 도구 ──
+        tools_menu = menubar.addMenu("도구")
+
+        act_dict = tools_menu.addAction("교정 사전 관리...")
+        act_dict.triggered.connect(self._open_dict_manager)
+
+        tools_menu.addSeparator()
+
+        act_settings = tools_menu.addAction("설정...")
+        act_settings.setShortcut("Ctrl+,")
+        act_settings.triggered.connect(self._on_settings)
+
+        # ── 도움말 ──
+        help_menu = menubar.addMenu("도움말")
+
+        act_guide = help_menu.addAction("시작 안내")
+        act_guide.triggered.connect(self._show_startup_guide)
+
+        act_about = help_menu.addAction("프로그램 정보")
+        act_about.triggered.connect(self._show_about)
+
+    def _open_dict_manager(self):
+        """메인 윈도우에서 교정 사전 관리 다이얼로그를 연다."""
+        dlg = CorrectionDictDialog(self.db, self)
+        dlg.exec()
+
+    def _show_about(self):
+        version = QApplication.instance().applicationVersion()
+        QMessageBox.about(
+            self, "프로그램 정보",
+            f"<h3>CATTS - Video Transcriber</h3>"
+            f"<p>버전: {version}</p>"
+            f"<p>영상/음성에서 텍스트를 추출하는 프로그램</p>"
+            f"<p>Whisper + pyannote + Demucs 기반</p>"
+            f"<hr>"
+            f"<p><a href='https://github.com/taxi-tabby/CATTS-VideoTranscriber'>GitHub</a></p>",
+        )
+
     def _build_ui(self):
+        self._build_menubar()
+
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
