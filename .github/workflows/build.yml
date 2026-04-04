@@ -510,21 +510,33 @@ jobs:
             exit 1
           fi
 
+      - name: Ad-hoc code sign
+        run: |
+          # ad-hoc 서명: Apple Developer 계정 없이도 가능
+          # "손상된 앱" → "확인되지 않은 개발자"로 변경 (우클릭 → 열기로 실행 가능)
+          codesign --force --deep --sign - build/output/dist/CATTS.app
+          echo "Ad-hoc signed CATTS.app"
+
       - name: Create DMG installer
         run: |
           VERSION="${{ needs.version.outputs.tag }}"
           DMG_NAME="CATTS-${VERSION}-macOS-arm64.dmg"
 
-          # 임시 DMG 디렉토리 구성
-          mkdir -p dmg_content
-          cp -R build/output/dist/CATTS.app dmg_content/
-          ln -s /Applications dmg_content/Applications
+          # create-dmg로 예쁜 DMG 생성 (배경, 아이콘 배치, Applications 바로가기)
+          brew install create-dmg
 
-          # DMG 생성
-          hdiutil create -volname "CATTS ${VERSION}" \
-            -srcfolder dmg_content \
-            -ov -format UDZO \
-            "${DMG_NAME}"
+          create-dmg \
+            --volname "CATTS ${VERSION}" \
+            --volicon "assets/icon/app.icns" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "CATTS.app" 150 185 \
+            --app-drop-link 450 185 \
+            --text-size 14 \
+            --hide-extension "CATTS.app" \
+            "${DMG_NAME}" \
+            "build/output/dist/CATTS.app"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
