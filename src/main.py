@@ -24,7 +24,7 @@ from src.main_window import MainWindow
 from src.model_utils import ensure_bundled_model
 
 
-APP_VERSION = 16
+APP_VERSION = 0
 
 
 def get_app_version() -> str:
