@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -719,6 +720,18 @@ class TranscriptionSettingsDialog(QDialog):
         profile_layout.addWidget(self.combo_profile)
         layout.addWidget(grp_profile)
 
+        # ── 교정 사전 ──
+        grp_dict = QGroupBox("교정 사전")
+        dict_layout = QHBoxLayout(grp_dict)
+        self.combo_dict = QComboBox()
+        self.combo_dict.addItem("사용 안 함", None)
+        self._load_dict_list()
+        dict_layout.addWidget(self.combo_dict)
+        btn_manage_dict = QPushButton("관리...")
+        btn_manage_dict.clicked.connect(self._open_dict_manager)
+        dict_layout.addWidget(btn_manage_dict)
+        layout.addWidget(grp_dict)
+
         # ── 화자 분리 ──
         grp_diar = QGroupBox("화자 분리")
         diar_layout = QVBoxLayout(grp_diar)
@@ -940,7 +953,168 @@ class TranscriptionSettingsDialog(QDialog):
             "whisper_workers": whisper_workers,
             "diar_threads": diar_threads,
             "profile": profile,
+            "correction_dict_id": self.combo_dict.currentData(),
         }
+
+    def _load_dict_list(self):
+        """교정 사전 목록을 콤보박스에 로드한다."""
+        current_id = self.combo_dict.currentData()
+        self.combo_dict.clear()
+        self.combo_dict.addItem("사용 안 함", None)
+        try:
+            parent = self.parent()
+            if parent and hasattr(parent, "db"):
+                for d in parent.db.list_correction_dicts():
+                    label = f"{d['name']} ({d['entry_count']}개)"
+                    self.combo_dict.addItem(label, d["id"])
+        except Exception:
+            pass
+        for i in range(self.combo_dict.count()):
+            if self.combo_dict.itemData(i) == current_id:
+                self.combo_dict.setCurrentIndex(i)
+                break
+
+    def _open_dict_manager(self):
+        """교정 사전 관리 다이얼로그를 연다."""
+        parent = self.parent()
+        if not parent or not hasattr(parent, "db"):
+            return
+        dlg = CorrectionDictDialog(parent.db, self)
+        dlg.exec()
+        self._load_dict_list()
+
+
+class CorrectionDictDialog(QDialog):
+    """교정 사전 관리 다이얼로그."""
+
+    def __init__(self, db, parent=None):
+        super().__init__(parent)
+        self.db = db
+        self.setWindowTitle("교정 사전 관리")
+        self.setMinimumSize(600, 400)
+        self._build_ui()
+        self._refresh()
+
+    def _build_ui(self):
+        layout = QHBoxLayout(self)
+
+        left = QVBoxLayout()
+        self.list_dicts = QListWidget()
+        self.list_dicts.currentRowChanged.connect(self._on_dict_selected)
+        left.addWidget(QLabel("사전 목록"))
+        left.addWidget(self.list_dicts)
+
+        btn_row = QHBoxLayout()
+        btn_add = QPushButton("+ 새 사전")
+        btn_add.clicked.connect(self._add_dict)
+        btn_del = QPushButton("삭제")
+        btn_del.clicked.connect(self._delete_dict)
+        btn_row.addWidget(btn_add)
+        btn_row.addWidget(btn_del)
+        left.addLayout(btn_row)
+        layout.addLayout(left, 1)
+
+        right = QVBoxLayout()
+        right.addWidget(QLabel("교정 항목 (잘못된 표현 → 올바른 표현)"))
+        self.table_entries = QTableWidget()
+        self.table_entries.setColumnCount(2)
+        self.table_entries.setHorizontalHeaderLabels(["잘못 인식되는 표현", "올바른 표현"])
+        self.table_entries.horizontalHeader().setStretchLastSection(True)
+        self.table_entries.horizontalHeader().setSectionResizeMode(
+            0, self.table_entries.horizontalHeader().ResizeMode.Stretch)
+        self.table_entries.setSelectionBehavior(self.table_entries.SelectionBehavior.SelectRows)
+        self.table_entries.verticalHeader().setVisible(False)
+        right.addWidget(self.table_entries)
+
+        entry_btn_row = QHBoxLayout()
+        btn_add_entry = QPushButton("+ 항목 추가")
+        btn_add_entry.clicked.connect(self._add_entry)
+        btn_del_entry = QPushButton("항목 삭제")
+        btn_del_entry.clicked.connect(self._delete_entry)
+        btn_save = QPushButton("저장")
+        btn_save.clicked.connect(self._save_entries)
+        entry_btn_row.addWidget(btn_add_entry)
+        entry_btn_row.addWidget(btn_del_entry)
+        entry_btn_row.addStretch()
+        entry_btn_row.addWidget(btn_save)
+        right.addLayout(entry_btn_row)
+        layout.addLayout(right, 2)
+
+    def _refresh(self):
+        self.list_dicts.clear()
+        self._dicts = self.db.list_correction_dicts()
+        for d in self._dicts:
+            self.list_dicts.addItem(f"{d['name']} ({d['entry_count']}개)")
+        self.table_entries.setRowCount(0)
+
+    def _current_dict_id(self):
+        row = self.list_dicts.currentRow()
+        if row < 0 or row >= len(self._dicts):
+            return None
+        return self._dicts[row]["id"]
+
+    def _on_dict_selected(self, row):
+        dict_id = self._current_dict_id()
+        if dict_id is None:
+            self.table_entries.setRowCount(0)
+            return
+        entries = self.db.get_correction_entries(dict_id)
+        self.table_entries.setRowCount(len(entries))
+        for i, e in enumerate(entries):
+            item_wrong = QTableWidgetItem(e["wrong"])
+            item_correct = QTableWidgetItem(e["correct"])
+            item_wrong.setData(Qt.ItemDataRole.UserRole, e["id"])
+            self.table_entries.setItem(i, 0, item_wrong)
+            self.table_entries.setItem(i, 1, item_correct)
+
+    def _add_dict(self):
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "새 사전", "사전 이름:")
+        if ok and name.strip():
+            self.db.create_correction_dict(name.strip())
+            self._refresh()
+            self.list_dicts.setCurrentRow(self.list_dicts.count() - 1)
+
+    def _delete_dict(self):
+        dict_id = self._current_dict_id()
+        if dict_id is None:
+            return
+        from PySide6.QtWidgets import QMessageBox
+        if QMessageBox.question(self, "삭제", "이 사전을 삭제하시겠습니까?") == QMessageBox.StandardButton.Yes:
+            self.db.delete_correction_dict(dict_id)
+            self._refresh()
+
+    def _add_entry(self):
+        dict_id = self._current_dict_id()
+        if dict_id is None:
+            return
+        row = self.table_entries.rowCount()
+        self.table_entries.insertRow(row)
+        self.table_entries.setItem(row, 0, QTableWidgetItem(""))
+        self.table_entries.setItem(row, 1, QTableWidgetItem(""))
+        self.table_entries.editItem(self.table_entries.item(row, 0))
+
+    def _delete_entry(self):
+        rows = set(idx.row() for idx in self.table_entries.selectedIndexes())
+        for row in sorted(rows, reverse=True):
+            item = self.table_entries.item(row, 0)
+            entry_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+            if entry_id:
+                self.db.delete_correction_entry(entry_id)
+            self.table_entries.removeRow(row)
+
+    def _save_entries(self):
+        dict_id = self._current_dict_id()
+        if dict_id is None:
+            return
+        for e in self.db.get_correction_entries(dict_id):
+            self.db.delete_correction_entry(e["id"])
+        for row in range(self.table_entries.rowCount()):
+            wrong = (self.table_entries.item(row, 0).text() or "").strip()
+            correct = (self.table_entries.item(row, 1).text() or "").strip()
+            if wrong and correct:
+                self.db.add_correction_entry(dict_id, wrong, correct)
+        self._on_dict_selected(self.list_dicts.currentRow())
 
 
 # ────────────────────────────────────────────
@@ -1772,6 +1946,15 @@ class MainWindow(QMainWindow):
 
     # ── 변환 시작/대기열 (Feature 2) ──
 
+    def _load_correction_entries(self, dict_id) -> list:
+        """교정 사전 ID로 항목을 로드한다. None이면 빈 리스트."""
+        if dict_id is None:
+            return []
+        try:
+            return self.db.get_correction_entries(dict_id)
+        except Exception:
+            return []
+
     def _start_transcription(
         self, video_path: str, settings: dict, hf_token: str | None = None,
         resume_tid: int | None = None, skip_seconds: float = 0.0,
@@ -1841,6 +2024,7 @@ class MainWindow(QMainWindow):
             diar_threads=settings.get("diar_threads", 1),
             skip_seconds=skip_seconds,
             profile=settings.get("profile", "interview"),
+            correction_entries=self._load_correction_entries(settings.get("correction_dict_id")),
         )
         self._worker.moveToThread(self._thread)
 

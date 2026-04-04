@@ -200,6 +200,16 @@ def _subprocess_worker(params: dict, msg_queue: mp.Queue, cancel_event: mp.Event
         full_text_parts = []
         prev_text = ""
 
+        # 교정 사전 로드
+        correction_entries = params.get("correction_entries") or []
+        if correction_entries:
+            # prompt 힌트: 올바른 단어들을 쉼표로 연결 (중복 제거)
+            correct_words = list(dict.fromkeys(e["correct"] for e in correction_entries))
+            correction_hint = ", ".join(correct_words)
+            _log(f"교정 사전 적용: {len(correction_entries)}개 항목 ({correction_hint[:80]}...)")
+        else:
+            correction_hint = ""
+
         skip_samples = int(skip_seconds * SAMPLE_RATE) if skip_seconds > 0 else 0
         skip_sec = skip_seconds
 
@@ -245,9 +255,15 @@ def _subprocess_worker(params: dict, msg_queue: mp.Queue, cancel_event: mp.Event
                 eta_str = ""
             _progress(pct, f"[{transcribe_step}/{step_total}] 변환 중... {processed_sec:.0f}s / {audio_duration:.0f}s{eta_str}")
 
-            prompt = prev_text[-200:] if prev_text else None
-            if prompt:
-                prompt = _SPECIAL_TOKEN_RE.sub("", prompt).strip() or None
+            # prompt 구성: 교정 힌트 + 이전 청크 텍스트 (224토큰 이내)
+            prompt_parts = []
+            if correction_hint:
+                prompt_parts.append(correction_hint)
+            if prev_text:
+                ctx = _SPECIAL_TOKEN_RE.sub("", prev_text[-200:]).strip()
+                if ctx:
+                    prompt_parts.append(ctx)
+            prompt = ". ".join(prompt_parts) if prompt_parts else None
 
             result = model.transcribe(
                 chunk, language=lang_arg, verbose=False,
@@ -294,6 +310,24 @@ def _subprocess_worker(params: dict, msg_queue: mp.Queue, cancel_event: mp.Event
         filtered_count = pre_filter_count - len(all_segments)
         if filtered_count > 0:
             _log(f"환각 필터: {filtered_count}개 세그먼트 제거 ({pre_filter_count} → {len(all_segments)})")
+
+        # 교정 사전 후처리: 잘못된 표현 → 올바른 표현 치환
+        if correction_entries:
+            replaced_count = 0
+            for seg in all_segments:
+                original = seg["text"]
+                for entry in correction_entries:
+                    if entry["wrong"] in seg["text"]:
+                        seg["text"] = seg["text"].replace(entry["wrong"], entry["correct"])
+                if seg["text"] != original:
+                    replaced_count += 1
+            if replaced_count > 0:
+                _log(f"교정 사전 치환: {replaced_count}개 세그먼트 수정")
+            # full_text도 치환
+            full_text = " ".join(full_text_parts)
+            for entry in correction_entries:
+                full_text = full_text.replace(entry["wrong"], entry["correct"])
+            full_text_parts = [full_text]
 
         # 최종 라벨 매핑
         if diarization_segments:
@@ -482,6 +516,7 @@ class TranscriberWorker(QObject):
         diar_threads: int = 1,
         skip_seconds: float = 0.0,
         profile: str = "interview",
+        correction_entries: list | None = None,
     ):
         super().__init__()
         self.video_path = video_path
@@ -496,6 +531,7 @@ class TranscriberWorker(QObject):
         self.diar_threads = diar_threads
         self.skip_seconds = skip_seconds
         self.profile = profile
+        self.correction_entries = correction_entries or []
         self._cancelled = False
 
     def cancel(self):
@@ -551,6 +587,7 @@ class TranscriberWorker(QObject):
                 "min_speakers": self.min_speakers,
                 "max_speakers": self.max_speakers,
                 "diar_threads": self.diar_threads,
+                "correction_entries": self.correction_entries,
             }
 
             proc = ctx.Process(

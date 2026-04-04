@@ -23,6 +23,20 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
         )""",
         "ALTER TABLE transcriptions ADD COLUMN folder_id INTEGER REFERENCES folders(id) ON DELETE SET NULL",
     ]),
+    (5, "교정 사전 테이블 추가", [
+        """CREATE TABLE IF NOT EXISTS correction_dicts (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS correction_entries (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            dict_id INTEGER NOT NULL
+                REFERENCES correction_dicts(id) ON DELETE CASCADE,
+            wrong   TEXT NOT NULL,
+            correct TEXT NOT NULL
+        )""",
+    ]),
 ]
 
 LATEST_VERSION = MIGRATIONS[-1][0] if MIGRATIONS else 0
@@ -329,6 +343,62 @@ class Database:
             "UPDATE segments SET speaker = ? WHERE transcription_id = ? AND speaker = ?",
             (new_name, tid, old_name),
         )
+        self._conn.commit()
+
+    # ── 교정 사전 ──
+
+    def create_correction_dict(self, name: str) -> int:
+        cur = self._conn.execute(
+            "INSERT INTO correction_dicts (name, created_at) VALUES (?, ?)",
+            (name, datetime.now().isoformat()),
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def list_correction_dicts(self) -> list[dict]:
+        rows = self._conn.execute(
+            """SELECT d.id, d.name, d.created_at, COUNT(e.id) as entry_count
+               FROM correction_dicts d
+               LEFT JOIN correction_entries e ON e.dict_id = d.id
+               GROUP BY d.id
+               ORDER BY d.name""",
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_correction_dict(self, dict_id: int) -> None:
+        self._conn.execute("DELETE FROM correction_dicts WHERE id = ?", (dict_id,))
+        self._conn.commit()
+
+    def rename_correction_dict(self, dict_id: int, name: str) -> None:
+        self._conn.execute(
+            "UPDATE correction_dicts SET name = ? WHERE id = ?", (name, dict_id),
+        )
+        self._conn.commit()
+
+    def add_correction_entry(self, dict_id: int, wrong: str, correct: str) -> int:
+        cur = self._conn.execute(
+            "INSERT INTO correction_entries (dict_id, wrong, correct) VALUES (?, ?, ?)",
+            (dict_id, wrong, correct),
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def get_correction_entries(self, dict_id: int) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT id, wrong, correct FROM correction_entries WHERE dict_id = ? ORDER BY wrong",
+            (dict_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_correction_entry(self, entry_id: int, wrong: str, correct: str) -> None:
+        self._conn.execute(
+            "UPDATE correction_entries SET wrong = ?, correct = ? WHERE id = ?",
+            (wrong, correct, entry_id),
+        )
+        self._conn.commit()
+
+    def delete_correction_entry(self, entry_id: int) -> None:
+        self._conn.execute("DELETE FROM correction_entries WHERE id = ?", (entry_id,))
         self._conn.commit()
 
     def close(self):
