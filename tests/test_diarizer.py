@@ -1,5 +1,7 @@
 import pytest
-from src.diarizer import assign_speakers, map_speaker_labels
+import numpy as np
+from unittest.mock import patch, MagicMock
+from src.diarizer import assign_speakers, map_speaker_labels, DIAR_PROFILES
 
 
 class TestAssignSpeakers:
@@ -127,3 +129,196 @@ class TestMapSpeakerLabels:
         result = map_speaker_labels(segments)
         assert result[0]["speaker"] == "화자 1"
         assert result[1]["speaker"] == "화자 2"
+
+
+class TestEstimateNumSpeakers:
+    def test_single_speaker_high_similarity(self):
+        """임베딩이 모두 유사하면 화자 1명으로 판정해야 한다."""
+        from src.diarizer import _estimate_num_speakers
+        rng = np.random.RandomState(42)
+        base = rng.randn(256).astype(np.float32)
+        base = base / np.linalg.norm(base)
+        embeddings = np.array([base + rng.randn(256) * 0.01 for _ in range(5)])
+        embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+
+        result = _estimate_num_speakers(embeddings, max_speakers=5)
+        assert result == 1
+
+    def test_two_distinct_speakers(self):
+        """두 클러스터가 뚜렷하면 화자 2명으로 판정해야 한다."""
+        from src.diarizer import _estimate_num_speakers
+        rng = np.random.RandomState(42)
+        center_a = rng.randn(256).astype(np.float32)
+        center_b = -center_a
+        embeddings_a = np.array([center_a + rng.randn(256) * 0.05 for _ in range(5)])
+        embeddings_b = np.array([center_b + rng.randn(256) * 0.05 for _ in range(5)])
+        embeddings = np.vstack([embeddings_a, embeddings_b])
+        embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+
+        result = _estimate_num_speakers(embeddings, max_speakers=5)
+        assert result == 2
+
+    def test_respects_max_speakers(self):
+        """max_speakers를 초과하지 않아야 한다."""
+        from src.diarizer import _estimate_num_speakers
+        rng = np.random.RandomState(42)
+        embeddings = []
+        for i in range(3):
+            center = np.zeros(256, dtype=np.float32)
+            center[i * 80:(i + 1) * 80] = 1.0
+            for _ in range(5):
+                embeddings.append(center + rng.randn(256) * 0.05)
+        embeddings = np.array(embeddings)
+        embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+
+        result = _estimate_num_speakers(embeddings, max_speakers=2)
+        assert result <= 2
+
+    def test_single_embedding_returns_one(self):
+        """임베딩이 1개면 화자 1명이다."""
+        from src.diarizer import _estimate_num_speakers
+        embeddings = np.random.randn(1, 256).astype(np.float32)
+        result = _estimate_num_speakers(embeddings, max_speakers=5)
+        assert result == 1
+
+
+class TestClusterEmbeddings:
+    def test_assigns_labels_to_segments(self):
+        """각 세그먼트에 speaker 라벨을 할당해야 한다."""
+        from src.diarizer import _cluster_embeddings
+        rng = np.random.RandomState(42)
+        center_a = rng.randn(256).astype(np.float32)
+        center_b = -center_a
+        embeddings = np.vstack([
+            np.array([center_a + rng.randn(256) * 0.05 for _ in range(3)]),
+            np.array([center_b + rng.randn(256) * 0.05 for _ in range(3)]),
+        ])
+        embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+
+        segments = [
+            {"start": float(i), "end": float(i + 1)}
+            for i in range(6)
+        ]
+
+        result = _cluster_embeddings(embeddings, segments, num_speakers=2)
+        assert len(result) == 6
+        assert result[0]["speaker"] == result[1]["speaker"] == result[2]["speaker"]
+        assert result[3]["speaker"] == result[4]["speaker"] == result[5]["speaker"]
+        assert result[0]["speaker"] != result[3]["speaker"]
+        assert result[0]["speaker"].startswith("SPEAKER_")
+
+    def test_single_speaker(self):
+        """num_speakers=1이면 모두 같은 화자여야 한다."""
+        from src.diarizer import _cluster_embeddings
+        embeddings = np.random.randn(5, 256).astype(np.float32)
+        segments = [{"start": float(i), "end": float(i + 1)} for i in range(5)]
+
+        result = _cluster_embeddings(embeddings, segments, num_speakers=1)
+        speakers = set(r["speaker"] for r in result)
+        assert len(speakers) == 1
+
+
+class TestRunDiarization:
+    def test_returns_segments_with_speaker_labels(self):
+        """run_diarization()이 [{start, end, speaker}, ...] 형식을 반환해야 한다."""
+        from src.diarizer import run_diarization
+
+        fake_segments = [
+            {"start": 0.0, "end": 3.0},
+            {"start": 5.0, "end": 8.0},
+            {"start": 10.0, "end": 13.0},
+        ]
+        fake_embeddings = np.random.randn(3, 256).astype(np.float32)
+
+        with patch("src.diarizer._extract_speech_segments", return_value=fake_segments), \
+             patch("src.diarizer._extract_embeddings", return_value=fake_embeddings), \
+             patch("src.diarizer._estimate_num_speakers", return_value=1), \
+             patch("src.diarizer._cluster_embeddings") as mock_cluster:
+
+            mock_cluster.return_value = [
+                {"start": 0.0, "end": 3.0, "speaker": "SPEAKER_00"},
+                {"start": 5.0, "end": 8.0, "speaker": "SPEAKER_00"},
+                {"start": 10.0, "end": 13.0, "speaker": "SPEAKER_00"},
+            ]
+
+            result = run_diarization(
+                audio_path="dummy.wav",
+                hf_token="dummy_token",
+            )
+
+        assert len(result) == 3
+        assert all("start" in r and "end" in r and "speaker" in r for r in result)
+        assert all(r["speaker"] == "SPEAKER_00" for r in result)
+
+    def test_num_speakers_skips_estimation(self):
+        """num_speakers가 지정되면 _estimate_num_speakers를 호출하지 않아야 한다."""
+        from src.diarizer import run_diarization
+
+        fake_segments = [{"start": 0.0, "end": 5.0}]
+        fake_embeddings = np.random.randn(1, 256).astype(np.float32)
+
+        with patch("src.diarizer._extract_speech_segments", return_value=fake_segments), \
+             patch("src.diarizer._extract_embeddings", return_value=fake_embeddings), \
+             patch("src.diarizer._estimate_num_speakers") as mock_estimate, \
+             patch("src.diarizer._cluster_embeddings") as mock_cluster:
+
+            mock_cluster.return_value = [
+                {"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"},
+            ]
+
+            run_diarization(
+                audio_path="dummy.wav",
+                hf_token="dummy_token",
+                num_speakers=2,
+            )
+
+        mock_estimate.assert_not_called()
+        mock_cluster.assert_called_once()
+
+    def test_empty_segments_returns_empty(self):
+        """음성 구간이 없으면 빈 리스트를 반환해야 한다."""
+        from src.diarizer import run_diarization
+
+        with patch("src.diarizer._extract_speech_segments", return_value=[]):
+            result = run_diarization(
+                audio_path="dummy.wav",
+                hf_token="dummy_token",
+            )
+
+        assert result == []
+
+
+class TestDiarProfiles:
+    def test_interview_profile_exists(self):
+        assert "interview" in DIAR_PROFILES
+
+    def test_noisy_profile_exists(self):
+        assert "noisy" in DIAR_PROFILES
+
+    def test_profiles_have_required_keys(self):
+        required = {"label", "description", "vad_threshold", "min_gap",
+                     "min_duration", "max_duration", "similarity_threshold"}
+        for name, profile in DIAR_PROFILES.items():
+            for key in required:
+                assert key in profile, f"{name} profile missing {key}"
+
+    def test_noisy_has_higher_vad_threshold(self):
+        assert DIAR_PROFILES["noisy"]["vad_threshold"] > DIAR_PROFILES["interview"]["vad_threshold"]
+
+    def test_noisy_has_lower_similarity_threshold(self):
+        assert DIAR_PROFILES["noisy"]["similarity_threshold"] < DIAR_PROFILES["interview"]["similarity_threshold"]
+
+    def test_run_diarization_uses_profile(self):
+        """noisy 프로파일이 _extract_speech_segments에 전달되는지 확인."""
+        from src.diarizer import run_diarization
+
+        with patch("src.diarizer._extract_speech_segments", return_value=[]) as mock_extract:
+            run_diarization(
+                audio_path="dummy.wav",
+                hf_token="dummy_token",
+                profile_name="noisy",
+            )
+
+        call_kwargs = mock_extract.call_args
+        profile_arg = call_kwargs[1].get("profile") or call_kwargs[0][1]
+        assert profile_arg["label"] == "영상/영화/노래"

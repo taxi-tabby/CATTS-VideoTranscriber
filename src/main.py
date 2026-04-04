@@ -218,6 +218,7 @@ def selftest():
         ("torch", lambda m: m.__version__),
         ("PySide6.QtWidgets", lambda m: "OK"),
         ("soundfile", lambda m: "OK"),
+        ("demucs", lambda m: getattr(m, '__version__', 'OK')),
     ]
 
     for mod_name, get_info in test_modules:
@@ -266,6 +267,10 @@ def selftest():
 
 
 if __name__ == "__main__":
+    # Windows에서 multiprocessing.Process(spawn)가 정상 동작하려면 필수
+    import multiprocessing
+    multiprocessing.freeze_support()
+
     if "--selftest" in sys.argv:
         selftest()
     else:

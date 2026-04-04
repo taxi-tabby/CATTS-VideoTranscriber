@@ -2,6 +2,7 @@
 
 음성 인식 정확도를 높이기 위해 오디오 신호를 정리한다.
 적용 순서:
+  0. (noisy 프로파일) Demucs 보컬 분리 — 배경음악/효과음 제거
   1. high-pass filter  — 저주파 럼블/험 노이즈 제거
   2. noise reduction   — 배경 소음 제거 (spectral gating)
   3. Silero VAD        — 비음성 구간 무음 처리 (환각 방지)
@@ -57,44 +58,62 @@ def _load_silero_vad():
     return model, utils
 
 
+def get_speech_segments(
+    audio: np.ndarray,
+    threshold: float = 0.35,
+    min_speech_ms: int = 250,
+    min_silence_ms: int = 100,
+    speech_pad_ms: int = 30,
+) -> list[dict]:
+    """Silero VAD로 음성 구간을 검출한다.
+
+    Returns:
+        [{"start": float(초), "end": float(초)}, ...] 형태의 리스트.
+        음성이 없으면 빈 리스트를 반환한다.
+    """
+    import torch
+
+    model, utils = _load_silero_vad()
+    try:
+        get_speech_timestamps = utils[0]
+
+        audio_tensor = torch.from_numpy(audio)
+
+        speech_timestamps = get_speech_timestamps(
+            audio_tensor,
+            model,
+            sampling_rate=SAMPLE_RATE,
+            threshold=threshold,
+            min_speech_duration_ms=min_speech_ms,
+            min_silence_duration_ms=min_silence_ms,
+            speech_pad_ms=speech_pad_ms,
+        )
+
+        return [
+            {"start": ts["start"] / SAMPLE_RATE, "end": ts["end"] / SAMPLE_RATE}
+            for ts in speech_timestamps
+        ]
+    finally:
+        del model, utils
+        import gc as _gc
+        _gc.collect()
+
+
 def suppress_non_speech(audio: np.ndarray, threshold: float = 0.35) -> np.ndarray:
     """Silero VAD로 음성이 아닌 구간을 무음(0)으로 만든다.
 
     타이밍을 보존하면서 비음성 구간에서의 Whisper 환각을 방지한다.
     threshold가 낮을수록 더 많은 구간을 음성으로 판단한다.
     """
-    import torch
+    segments = get_speech_segments(audio, threshold=threshold)
 
-    model, utils = _load_silero_vad()
-    get_speech_timestamps = utils[0]
-
-    # Silero VAD는 torch tensor를 기대
-    audio_tensor = torch.from_numpy(audio)
-
-    speech_timestamps = get_speech_timestamps(
-        audio_tensor,
-        model,
-        sampling_rate=SAMPLE_RATE,
-        threshold=threshold,
-        min_speech_duration_ms=250,
-        min_silence_duration_ms=100,
-        speech_pad_ms=30,
-    )
-
-    # Silero VAD 모델 메모리 해제
-    del model, utils, audio_tensor
-    import gc as _gc
-    _gc.collect()
-
-    if not speech_timestamps:
-        # 음성이 전혀 감지되지 않으면 원본 반환
+    if not segments:
         return audio
 
-    # 비음성 구간을 0으로 채움
     suppressed = np.zeros_like(audio)
-    for ts in speech_timestamps:
-        start = ts["start"]
-        end = ts["end"]
+    for seg in segments:
+        start = int(seg["start"] * SAMPLE_RATE)
+        end = int(seg["end"] * SAMPLE_RATE)
         suppressed[start:end] = audio[start:end]
 
     return suppressed
@@ -151,19 +170,201 @@ def normalize_peak(audio: np.ndarray, target_peak: float = 0.95) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# 0. Demucs 보컬 분리 (noisy 프로파일 전용)
+# ---------------------------------------------------------------------------
+
+def separate_vocals(audio: np.ndarray, log_callback=None) -> np.ndarray:
+    """Demucs로 오디오에서 보컬(음성)만 분리한다.
+
+    배경음악, 효과음, 노래 반주를 제거하고 순수한 음성만 추출한다.
+    입력/출력 모두 16kHz mono numpy 배열이다.
+    """
+    import torch
+    import gc
+    import torchaudio.functional as F
+    from demucs.pretrained import get_model
+    from demucs.apply import apply_model
+
+    if log_callback:
+        log_callback("Demucs 모델 로드 중 (htdemucs)...")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = get_model("htdemucs")
+    model.to(device)
+
+    try:
+        # 16kHz mono → 44100Hz stereo (Demucs 입력 형식)
+        audio_tensor = torch.from_numpy(audio).float().unsqueeze(0)  # (1, samples)
+        audio_44k = F.resample(audio_tensor, SAMPLE_RATE, model.samplerate)
+        # mono → stereo
+        audio_stereo = audio_44k.expand(2, -1)  # (2, samples)
+
+        if log_callback:
+            log_callback("보컬 분리 처리 중...")
+
+        # apply_model expects (batch, channels, samples)
+        mix = audio_stereo.unsqueeze(0).to(device)  # (1, 2, samples)
+        with torch.inference_mode():
+            sources = apply_model(model, mix, device=device)
+        # sources shape: (1, n_sources, 2, samples)
+        # model.sources = ['drums', 'bass', 'other', 'vocals']
+        vocal_idx = model.sources.index("vocals")
+        vocals = sources[0, vocal_idx].cpu()  # (2, samples)
+
+        # stereo → mono, 44100Hz → 16kHz
+        vocals_mono = vocals.mean(dim=0, keepdim=True)  # (1, samples)
+        vocals_16k = F.resample(vocals_mono, model.samplerate, SAMPLE_RATE)
+        result = vocals_16k.squeeze().numpy().astype(np.float32)
+
+        if log_callback:
+            log_callback("보컬 분리 완료")
+
+        return result
+    finally:
+        del model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
+# ---------------------------------------------------------------------------
 # 통합 파이프라인
 # ---------------------------------------------------------------------------
 
-def preprocess(audio: np.ndarray) -> tuple[np.ndarray, int]:
+def preprocess(
+    audio: np.ndarray,
+    use_vocal_separation: bool = False,
+    log_callback=None,
+) -> tuple[np.ndarray, int]:
     """전처리 파이프라인.
+
+    Args:
+        audio: 16kHz mono numpy 배열
+        use_vocal_separation: True면 Demucs 보컬 분리를 먼저 수행한다
+        log_callback: (message: str) 형태. 상세 로그 출력.
 
     Returns:
         (preprocessed_audio, trim_offset_samples)
         trim_offset_samples: 트리밍으로 제거된 앞부분 샘플 수 (타이밍 보정용)
     """
+    if use_vocal_separation:
+        audio = separate_vocals(audio, log_callback=log_callback)
     audio = highpass_filter(audio)
     audio = reduce_noise(audio)
     audio = suppress_non_speech(audio)
     audio, trim_offset = trim_silence(audio)
     audio = normalize_peak(audio)
     return audio, trim_offset
+
+
+# ---------------------------------------------------------------------------
+# 화자분리용 세그먼트 후처리
+# ---------------------------------------------------------------------------
+
+def merge_speech_segments(
+    segments: list[dict],
+    min_gap: float = 0.5,
+    min_duration: float = 0.5,
+) -> list[dict]:
+    """인접 구간을 병합하고 짧은 구간을 제거한다.
+
+    Args:
+        segments: [{"start": float, "end": float}, ...] (초 단위, 정렬되어 있어야 함)
+        min_gap: 이 값 미만의 간격은 병합한다 (초)
+        min_duration: 이 값 미만의 구간은 제거한다 (초)
+    """
+    if not segments:
+        return []
+
+    merged = [segments[0].copy()]
+    for seg in segments[1:]:
+        if seg["start"] - merged[-1]["end"] < min_gap:
+            merged[-1]["end"] = seg["end"]
+        else:
+            merged.append(seg.copy())
+
+    return [s for s in merged if s["end"] - s["start"] >= min_duration]
+
+
+def split_long_segments(
+    segments: list[dict],
+    max_duration: float = 10.0,
+) -> list[dict]:
+    """긴 구간을 max_duration 단위로 분할한다.
+
+    Args:
+        segments: [{"start": float, "end": float}, ...] (초 단위)
+        max_duration: 이 값을 초과하면 분할한다 (초)
+    """
+    result = []
+    for seg in segments:
+        duration = seg["end"] - seg["start"]
+        if duration <= max_duration:
+            result.append(seg.copy())
+        else:
+            t = seg["start"]
+            while t < seg["end"]:
+                end = min(t + max_duration, seg["end"])
+                result.append({"start": t, "end": end})
+                t = end
+    return result
+
+
+# ---------------------------------------------------------------------------
+# VAD 기반 청크 분할 (Whisper 30초 제한 대응)
+# ---------------------------------------------------------------------------
+
+def build_vad_chunks(
+    speech_segments: list[dict],
+    total_samples: int,
+    max_chunk_sec: float = 30.0,
+    pad_sec: float = 0.1,
+) -> list[dict]:
+    """VAD 음성 구간을 기반으로 무음 지점에서 청크를 분할한다.
+
+    발화 중간을 자르지 않고, 인접 음성 구간을 병합하되
+    max_chunk_sec를 넘지 않도록 무음 지점에서만 분할한다.
+
+    Args:
+        speech_segments: [{"start": float(초), "end": float(초)}, ...]
+            get_speech_segments()의 반환값.
+        total_samples: 전체 오디오 샘플 수
+        max_chunk_sec: 청크 최대 길이 (초). Whisper의 30초 제한.
+        pad_sec: 청크 양쪽에 추가할 패딩 (초). 자연스러운 전환용.
+
+    Returns:
+        [{"start_sample": int, "end_sample": int}, ...]
+        무음만 있는 구간은 제외된다.
+    """
+    if not speech_segments:
+        return []
+
+    chunks: list[dict] = []
+    chunk_start = speech_segments[0]["start"]
+    chunk_end = speech_segments[0]["end"]
+
+    for seg in speech_segments[1:]:
+        # 현재 청크에 이 세그먼트를 추가했을 때의 길이
+        potential_end = seg["end"]
+        if potential_end - chunk_start <= max_chunk_sec:
+            # 병합
+            chunk_end = potential_end
+        else:
+            # 현재 청크 확정, 새 청크 시작
+            chunks.append({"start": chunk_start, "end": chunk_end})
+            chunk_start = seg["start"]
+            chunk_end = seg["end"]
+
+    # 마지막 청크 확정
+    chunks.append({"start": chunk_start, "end": chunk_end})
+
+    # 샘플 단위로 변환 + 패딩 + 클램프
+    result = []
+    for c in chunks:
+        start_sample = int((c["start"] - pad_sec) * SAMPLE_RATE)
+        end_sample = int((c["end"] + pad_sec) * SAMPLE_RATE)
+        start_sample = max(0, start_sample)
+        end_sample = min(total_samples, end_sample)
+        result.append({"start_sample": start_sample, "end_sample": end_sample})
+
+    return result
