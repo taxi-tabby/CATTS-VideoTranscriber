@@ -991,13 +991,14 @@ class CorrectionDictDialog(QDialog):
         super().__init__(parent)
         self.db = db
         self.setWindowTitle("교정 사전 관리")
-        self.setMinimumSize(600, 400)
+        self.setMinimumSize(800, 500)
         self._build_ui()
         self._refresh()
 
     def _build_ui(self):
         layout = QHBoxLayout(self)
 
+        # 왼쪽: 사전 목록
         left = QVBoxLayout()
         self.list_dicts = QListWidget()
         self.list_dicts.currentRowChanged.connect(self._on_dict_selected)
@@ -1005,23 +1006,47 @@ class CorrectionDictDialog(QDialog):
         left.addWidget(self.list_dicts)
 
         btn_row = QHBoxLayout()
-        btn_add = QPushButton("+ 새 사전")
+        btn_analyze = QPushButton("미디어 분석으로 생성...")
+        btn_analyze.clicked.connect(self._analyze_media)
+        btn_row.addWidget(btn_analyze)
+        left.addLayout(btn_row)
+
+        btn_row2 = QHBoxLayout()
+        btn_add = QPushButton("+ 빈 사전")
         btn_add.clicked.connect(self._add_dict)
         btn_del = QPushButton("삭제")
         btn_del.clicked.connect(self._delete_dict)
-        btn_row.addWidget(btn_add)
-        btn_row.addWidget(btn_del)
-        left.addLayout(btn_row)
+        btn_row2.addWidget(btn_add)
+        btn_row2.addWidget(btn_del)
+        left.addLayout(btn_row2)
         layout.addLayout(left, 1)
 
+        # 오른쪽: 사전 정보 + 항목
         right = QVBoxLayout()
-        right.addWidget(QLabel("교정 항목 (잘못된 표현 → 올바른 표현)"))
+
+        # 체크섬 정보
+        info_row = QHBoxLayout()
+        self.lbl_media = QLabel("미디어: —")
+        self.lbl_checksum = QLabel("체크섬: —")
+        self.lbl_checksum.setStyleSheet("color: gray; font-size: 11px;")
+        btn_change_checksum = QPushButton("체크섬 변경...")
+        btn_change_checksum.clicked.connect(self._change_checksum)
+        info_row.addWidget(self.lbl_media)
+        info_row.addStretch()
+        info_row.addWidget(btn_change_checksum)
+        right.addLayout(info_row)
+        right.addWidget(self.lbl_checksum)
+
+        # 항목 테이블 (화자, 인식된 단어, 교정, 빈도)
+        right.addWidget(QLabel("교정 항목 (빈도순 — '교정' 열을 편집하면 변환 시 적용됩니다)"))
         self.table_entries = QTableWidget()
-        self.table_entries.setColumnCount(2)
-        self.table_entries.setHorizontalHeaderLabels(["잘못 인식되는 표현", "올바른 표현"])
-        self.table_entries.horizontalHeader().setStretchLastSection(True)
-        self.table_entries.horizontalHeader().setSectionResizeMode(
-            0, self.table_entries.horizontalHeader().ResizeMode.Stretch)
+        self.table_entries.setColumnCount(4)
+        self.table_entries.setHorizontalHeaderLabels(["화자", "인식된 단어", "교정", "빈도"])
+        header = self.table_entries.horizontalHeader()
+        header.setSectionResizeMode(0, header.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, header.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, header.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, header.ResizeMode.ResizeToContents)
         self.table_entries.setSelectionBehavior(self.table_entries.SelectionBehavior.SelectRows)
         self.table_entries.verticalHeader().setVisible(False)
         right.addWidget(self.table_entries)
@@ -1038,14 +1063,17 @@ class CorrectionDictDialog(QDialog):
         entry_btn_row.addStretch()
         entry_btn_row.addWidget(btn_save)
         right.addLayout(entry_btn_row)
-        layout.addLayout(right, 2)
+        layout.addLayout(right, 3)
 
     def _refresh(self):
         self.list_dicts.clear()
         self._dicts = self.db.list_correction_dicts()
         for d in self._dicts:
-            self.list_dicts.addItem(f"{d['name']} ({d['entry_count']}개)")
+            media = f" [{d.get('media_filename') or '수동'}]" if d.get('media_filename') else ""
+            self.list_dicts.addItem(f"{d['name']}{media} ({d['entry_count']}개)")
         self.table_entries.setRowCount(0)
+        self.lbl_media.setText("미디어: —")
+        self.lbl_checksum.setText("체크섬: —")
 
     def _current_dict_id(self):
         row = self.list_dicts.currentRow()
@@ -1057,18 +1085,184 @@ class CorrectionDictDialog(QDialog):
         dict_id = self._current_dict_id()
         if dict_id is None:
             self.table_entries.setRowCount(0)
+            self.lbl_media.setText("미디어: —")
+            self.lbl_checksum.setText("체크섬: —")
             return
+
+        d = self.db.get_correction_dict(dict_id)
+        if d:
+            self.lbl_media.setText(f"미디어: {d.get('media_filename') or '(없음)'}")
+            cs = d.get("media_checksum") or "—"
+            self.lbl_checksum.setText(f"체크섬: {cs[:16]}..." if len(cs) > 16 else f"체크섬: {cs}")
+
         entries = self.db.get_correction_entries(dict_id)
         self.table_entries.setRowCount(len(entries))
         for i, e in enumerate(entries):
-            item_wrong = QTableWidgetItem(e["wrong"])
-            item_correct = QTableWidgetItem(e["correct"])
-            item_wrong.setData(Qt.ItemDataRole.UserRole, e["id"])
-            self.table_entries.setItem(i, 0, item_wrong)
-            self.table_entries.setItem(i, 1, item_correct)
+            speaker_item = QTableWidgetItem(e.get("speaker") or "—")
+            speaker_item.setFlags(speaker_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            wrong_item = QTableWidgetItem(e["wrong"])
+            correct_item = QTableWidgetItem(e["correct"])
+            freq_item = QTableWidgetItem(str(e.get("frequency", 1)))
+            freq_item.setFlags(freq_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+
+            wrong_item.setData(Qt.ItemDataRole.UserRole, e["id"])
+            # 타임스탬프 등 메타데이터를 UserRole+1에 저장
+            wrong_item.setData(Qt.ItemDataRole.UserRole + 1, {
+                "start_time": e.get("start_time"),
+                "end_time": e.get("end_time"),
+                "speaker": e.get("speaker"),
+                "frequency": e.get("frequency", 1),
+                "is_corrected": e.get("is_corrected", 0),
+            })
+
+            self.table_entries.setItem(i, 0, speaker_item)
+            self.table_entries.setItem(i, 1, wrong_item)
+            self.table_entries.setItem(i, 2, correct_item)
+            self.table_entries.setItem(i, 3, freq_item)
+
+    def _analyze_media(self):
+        """미디어 파일을 선택하고 분석하여 사전을 생성한다."""
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "미디어 파일 선택", "",
+            "미디어 파일 (*.mp4 *.mkv *.avi *.mov *.webm *.mp3 *.wav *.flac *.m4a);;모든 파일 (*)",
+        )
+        if not filepath:
+            return
+
+        name, ok = QInputDialog.getText(
+            self, "사전 이름", "새 사전 이름:",
+            text=os.path.splitext(os.path.basename(filepath))[0],
+        )
+        if not ok or not name.strip():
+            return
+
+        from src.database import compute_file_checksum
+        checksum = compute_file_checksum(filepath)
+
+        # 진행 다이얼로그
+        from PySide6.QtWidgets import QProgressDialog
+        progress = QProgressDialog("미디어 분석 중...", "취소", 0, 100, self)
+        progress.setWindowTitle("사전 분석")
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        import multiprocessing as mp
+        from src.dict_analyzer import _analyze_worker
+        from src.transcriber import extract_audio, get_ffmpeg_exe
+
+        # ffmpeg으로 오디오 추출
+        import tempfile
+        tmp_wav = os.path.join(tempfile.gettempdir(), f"vt_dict_{os.path.basename(filepath)}.wav")
+        try:
+            extract_audio(filepath, tmp_wav, get_ffmpeg_exe())
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"오디오 추출 실패: {e}")
+            return
+
+        ctx = mp.get_context("spawn")
+        msg_queue = ctx.Queue()
+        cancel_event = ctx.Event()
+
+        params = {
+            "wav_path": tmp_wav,
+            "model_name": "medium",
+            "language": "ko",
+            "use_diar": False,
+            "profile": "interview",
+        }
+
+        proc = ctx.Process(target=_analyze_worker, args=(params, msg_queue, cancel_event), daemon=True)
+        proc.start()
+
+        result_data = None
+        while proc.is_alive() or not msg_queue.empty():
+            if progress.wasCanceled():
+                cancel_event.set()
+                proc.join(timeout=10)
+                break
+            try:
+                msg = msg_queue.get(timeout=0.1)
+            except Exception:
+                QApplication.processEvents()
+                continue
+
+            if msg[0] == "progress":
+                progress.setValue(msg[1])
+                progress.setLabelText(msg[2])
+            elif msg[0] == "result":
+                result_data = msg[1]
+            elif msg[0] == "error":
+                QMessageBox.critical(self, "분석 오류", msg[1])
+                break
+            QApplication.processEvents()
+
+        proc.join(timeout=5)
+        progress.close()
+
+        # 임시 파일 정리
+        try:
+            os.remove(tmp_wav)
+        except OSError:
+            pass
+
+        if not result_data:
+            return
+
+        # DB에 사전 생성 + 항목 저장
+        dict_id = self.db.create_correction_dict(
+            name.strip(),
+            media_checksum=checksum,
+            media_filename=os.path.basename(filepath),
+        )
+
+        entries = []
+        for w in result_data["words"]:
+            entries.append({
+                "wrong": w["word"],
+                "correct": w["word"],  # 초기에는 동일 (사용자가 교정)
+                "start_time": w["start"],
+                "end_time": w["end"],
+                "speaker": w.get("speaker"),
+                "frequency": w["frequency"],
+                "is_corrected": False,
+            })
+        self.db.replace_correction_entries(dict_id, entries)
+
+        self._refresh()
+        # 새로 만든 사전 선택
+        for i in range(self.list_dicts.count()):
+            if i < len(self._dicts) and self._dicts[i]["id"] == dict_id:
+                self.list_dicts.setCurrentRow(i)
+                break
+
+    def _change_checksum(self):
+        dict_id = self._current_dict_id()
+        if dict_id is None:
+            return
+        # 파일 선택 또는 직접 입력
+        choice = QMessageBox.question(
+            self, "체크섬 변경",
+            "파일을 선택하여 체크섬을 계산하시겠습니까?\n\n'아니오'를 선택하면 직접 입력할 수 있습니다.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+        )
+        if choice == QMessageBox.StandardButton.Cancel:
+            return
+        elif choice == QMessageBox.StandardButton.Yes:
+            filepath, _ = QFileDialog.getOpenFileName(self, "미디어 파일 선택")
+            if not filepath:
+                return
+            from src.database import compute_file_checksum
+            new_checksum = compute_file_checksum(filepath)
+        else:
+            new_checksum, ok = QInputDialog.getText(self, "체크섬 입력", "새 체크섬 값:")
+            if not ok or not new_checksum.strip():
+                return
+            new_checksum = new_checksum.strip()
+
+        self.db.update_correction_dict_checksum(dict_id, new_checksum)
+        self._on_dict_selected(self.list_dicts.currentRow())
 
     def _add_dict(self):
-        from PySide6.QtWidgets import QInputDialog
         name, ok = QInputDialog.getText(self, "새 사전", "사전 이름:")
         if ok and name.strip():
             self.db.create_correction_dict(name.strip())
@@ -1079,7 +1273,6 @@ class CorrectionDictDialog(QDialog):
         dict_id = self._current_dict_id()
         if dict_id is None:
             return
-        from PySide6.QtWidgets import QMessageBox
         if QMessageBox.question(self, "삭제", "이 사전을 삭제하시겠습니까?") == QMessageBox.StandardButton.Yes:
             self.db.delete_correction_dict(dict_id)
             self._refresh()
@@ -1090,14 +1283,16 @@ class CorrectionDictDialog(QDialog):
             return
         row = self.table_entries.rowCount()
         self.table_entries.insertRow(row)
-        self.table_entries.setItem(row, 0, QTableWidgetItem(""))
+        self.table_entries.setItem(row, 0, QTableWidgetItem("—"))
         self.table_entries.setItem(row, 1, QTableWidgetItem(""))
-        self.table_entries.editItem(self.table_entries.item(row, 0))
+        self.table_entries.setItem(row, 2, QTableWidgetItem(""))
+        self.table_entries.setItem(row, 3, QTableWidgetItem("1"))
+        self.table_entries.editItem(self.table_entries.item(row, 1))
 
     def _delete_entry(self):
         rows = set(idx.row() for idx in self.table_entries.selectedIndexes())
         for row in sorted(rows, reverse=True):
-            item = self.table_entries.item(row, 0)
+            item = self.table_entries.item(row, 1)
             entry_id = item.data(Qt.ItemDataRole.UserRole) if item else None
             if entry_id:
                 self.db.delete_correction_entry(entry_id)
@@ -1109,10 +1304,22 @@ class CorrectionDictDialog(QDialog):
             return
         entries = []
         for row in range(self.table_entries.rowCount()):
-            wrong = (self.table_entries.item(row, 0).text() or "").strip()
-            correct = (self.table_entries.item(row, 1).text() or "").strip()
-            if wrong and correct:
-                entries.append({"wrong": wrong, "correct": correct})
+            wrong_item = self.table_entries.item(row, 1)
+            wrong = (wrong_item.text() or "").strip()
+            correct = (self.table_entries.item(row, 2).text() or "").strip()
+            if not wrong or not correct:
+                continue
+            meta = wrong_item.data(Qt.ItemDataRole.UserRole + 1) or {}
+            is_corrected = wrong != correct  # 교정 열이 다르면 교정된 것
+            entries.append({
+                "wrong": wrong,
+                "correct": correct,
+                "start_time": meta.get("start_time"),
+                "end_time": meta.get("end_time"),
+                "speaker": meta.get("speaker"),
+                "frequency": meta.get("frequency", 1),
+                "is_corrected": is_corrected,
+            })
         self.db.replace_correction_entries(dict_id, entries)
         self._on_dict_selected(self.list_dicts.currentRow())
 
@@ -1946,11 +2153,23 @@ class MainWindow(QMainWindow):
 
     # ── 변환 시작/대기열 (Feature 2) ──
 
-    def _load_correction_entries(self, dict_id) -> list:
-        """교정 사전 ID로 항목을 로드한다. None이면 빈 리스트."""
+    def _load_correction_entries(self, dict_id, video_path: str = "") -> list:
+        """교정 사전 ID로 항목을 로드한다. 체크섬 불일치 시 빈 리스트."""
         if dict_id is None:
             return []
         try:
+            d = self.db.get_correction_dict(dict_id)
+            if not d:
+                return []
+            # 체크섬 검증 (체크섬이 있는 사전만)
+            if d.get("media_checksum") and video_path:
+                from src.database import compute_file_checksum
+                file_checksum = compute_file_checksum(video_path)
+                if file_checksum != d["media_checksum"]:
+                    self._on_log_message(
+                        f"⚠ 교정 사전 '{d['name']}'의 체크섬이 불일치합니다. 사전을 적용하지 않습니다."
+                    )
+                    return []
             return self.db.get_correction_entries(dict_id)
         except Exception:
             return []
@@ -2024,7 +2243,7 @@ class MainWindow(QMainWindow):
             diar_threads=settings.get("diar_threads", 1),
             skip_seconds=skip_seconds,
             profile=settings.get("profile", "interview"),
-            correction_entries=self._load_correction_entries(settings.get("correction_dict_id")),
+            correction_entries=self._load_correction_entries(settings.get("correction_dict_id"), video_path),
         )
         self._worker.moveToThread(self._thread)
 
