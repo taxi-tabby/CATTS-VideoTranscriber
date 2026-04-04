@@ -1,4 +1,3 @@
-import copy
 import gc
 import multiprocessing as mp
 import os
@@ -144,7 +143,7 @@ def _subprocess_worker(params: dict, msg_queue: mp.Queue, cancel_event: mp.Event
 
             tmp_clean_wav = os.path.join(
                 tempfile.gettempdir(),
-                f"vt_subprocess_clean.wav",
+                f"vt_subprocess_clean_{os.getpid()}.wav",
             )
             save_numpy_as_wav(audio, tmp_clean_wav)
             _log("전처리된 오디오를 화자 분석에 사용")
@@ -374,63 +373,6 @@ def _subprocess_worker(params: dict, msg_queue: mp.Queue, cancel_event: mp.Event
         _log(f"오류 발생: {e}")
         msg_queue.put(("error", str(e)))
 
-
-def _force_release_ml_memory() -> None:
-    """ML 모델/텐서 관련 메모리를 강제로 해제한다.
-
-    Python/PyTorch는 del + gc.collect() 후에도 수 GB의 메모리를 유지한다.
-    이는 PyTorch 내부 캐시, C 런타임의 힙 관리, 모듈 레벨 전역 변수 등 때문이다.
-
-    이 함수는:
-    1. torch 관련 캐시를 모두 비운다
-    2. gc를 여러 차례 실행하여 순환 참조를 해제한다
-    3. ML 라이브러리를 sys.modules에서 제거하여 모듈 레벨 참조를 끊는다
-    4. OS에 메모리 반환을 요청한다
-    """
-    import sys
-
-    gc.collect()
-    gc.collect()
-
-    # torch 캐시 해제
-    try:
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
-    except Exception:
-        pass
-
-    gc.collect()
-
-    # ML 라이브러리를 sys.modules에서 제거 — 모듈 레벨 캐시/전역 변수 해제
-    _unload_prefixes = (
-        "whisper", "demucs", "openunmix",
-        "pyannote", "speechbrain",
-        "asteroid_filterbanks",
-    )
-    for mod_name in list(sys.modules.keys()):
-        if any(mod_name.startswith(p) for p in _unload_prefixes):
-            del sys.modules[mod_name]
-
-    gc.collect()
-    gc.collect()
-
-    # OS에 미사용 힙 메모리 반환 요청
-    try:
-        import ctypes
-        if sys.platform == "win32":
-            ctypes.windll.kernel32.SetProcessWorkingSetSize(
-                ctypes.windll.kernel32.GetCurrentProcess(),
-                ctypes.c_size_t(-1), ctypes.c_size_t(-1),
-            )
-        elif sys.platform == "linux":
-            libc = ctypes.CDLL("libc.so.6")
-            libc.malloc_trim(0)
-        # macOS: malloc_trim 없음 — subprocess 방식이므로 불필요
-    except Exception:
-        pass
-CHUNK_SAMPLES = CHUNK_SECONDS * SAMPLE_RATE
 
 
 def _get_available_memory_mb() -> int:

@@ -166,6 +166,5 @@ def _analyze_worker(params: dict, msg_queue: mp.Queue, cancel_event: mp.Event) -
         msg_queue.put(("result", {"words": word_entries}))
 
     except Exception as e:
-        import traceback
         _log(f"오류 발생: {e}")
         msg_queue.put(("error", str(e)))

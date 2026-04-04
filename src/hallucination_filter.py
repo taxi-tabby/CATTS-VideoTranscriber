@@ -47,25 +47,20 @@ def _filter_tiny_segments(segments: list[dict]) -> list[dict]:
     return result
 
 
-def _filter_repetitions(segments: list[dict], max_repeats: int = 3) -> list[dict]:
-    """동일 텍스트가 연속으로 max_repeats회 이상 반복되면 1회만 유지한다."""
+def _filter_repetitions(segments: list[dict]) -> list[dict]:
+    """동일 텍스트가 연속으로 반복되면 1회만 유지한다."""
     if not segments:
         return []
 
     result = []
     prev_text = None
-    run_count = 0
 
     for s in segments:
         text = s.get("text", "").strip()
         if text and text == prev_text:
-            run_count += 1
-        else:
-            run_count = 1
-            prev_text = text
-        # 연속 반복의 첫 번째만 유지
-        if run_count <= 1:
-            result.append(s)
+            continue
+        prev_text = text
+        result.append(s)
 
     return result
 
