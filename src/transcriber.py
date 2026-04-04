@@ -60,6 +60,28 @@ def get_video_duration(audio: np.ndarray) -> float:
 
 SAMPLE_RATE = 16000
 CHUNK_SECONDS = 30
+
+
+def _trim_process_memory() -> None:
+    """OS에 사용하지 않는 힙 메모리를 반환하도록 요청한다.
+
+    Python/PyTorch는 free() 후에도 메모리를 프로세스에 유지하는 경우가 많다.
+    Windows에서는 SetProcessWorkingSetSize로 워킹셋을 트림하고,
+    Linux에서는 malloc_trim으로 힙을 반환한다.
+    """
+    import sys
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            # 현재 프로세스의 워킹셋을 최소화 → OS가 미사용 페이지 회수
+            handle = ctypes.windll.kernel32.GetCurrentProcess()
+            ctypes.windll.kernel32.SetProcessWorkingSetSize(handle, -1, -1)
+        else:
+            import ctypes
+            libc = ctypes.CDLL("libc.so.6")
+            libc.malloc_trim(0)
+    except Exception:
+        pass
 CHUNK_SAMPLES = CHUNK_SECONDS * SAMPLE_RATE
 
 
@@ -480,7 +502,10 @@ class TranscriberWorker(QObject):
                 # 워커 모델 메모리 해제
                 del _worker_models
                 del _thread_local
+                _heavy_refs.clear()
                 gc.collect()
+                if _torch.cuda.is_available():
+                    _torch.cuda.empty_cache()
                 self._log("워커 모델 메모리 해제 완료")
 
                 if failed_chunks:
@@ -620,7 +645,11 @@ class TranscriberWorker(QObject):
                 # 싱글스레드 완료 후 모델/오디오 해제
                 del model
                 del audio
+                _heavy_refs.clear()
                 gc.collect()
+                import torch as _torch_single
+                if _torch_single.cuda.is_available():
+                    _torch_single.cuda.empty_cache()
 
             # 최종 한글 라벨 매핑
             if diarization_segments:
@@ -683,6 +712,9 @@ class TranscriberWorker(QObject):
                     _torch_cleanup.cuda.empty_cache()
             except Exception:
                 pass
+
+            # Python/C 런타임이 OS에 메모리를 반환하도록 강제 트림
+            _trim_process_memory()
 
             if tmp_wav and os.path.exists(tmp_wav):
                 try:
