@@ -5,7 +5,6 @@ Whisper는 무음/잡음 구간에서 반복 텍스트, 잘못된 언어, 존재
 """
 
 import re
-import unicodedata
 
 
 def filter_hallucinations(
@@ -54,28 +53,18 @@ def _filter_repetitions(segments: list[dict], max_repeats: int = 3) -> list[dict
         return []
 
     result = []
-    repeat_count = 1
     prev_text = None
+    run_count = 0
 
     for s in segments:
         text = s.get("text", "").strip()
-        if text == prev_text and text:
-            repeat_count += 1
-            if repeat_count >= max_repeats:
-                # max_repeats 이상 반복 → 첫 번째만 유지하고 나머지 제거
-                # 이미 추가된 2..max_repeats-1번째도 제거해야 하므로 result에서 제거
-                while len(result) > 0 and result[-1].get("text", "").strip() == text:
-                    # 첫 번째 하나만 남기고 제거
-                    if len(result) >= 2 and result[-2].get("text", "").strip() == text:
-                        result.pop(-1)
-                    else:
-                        break
-                # 이후 반복은 추가하지 않음
-            else:
-                result.append(s)
+        if text and text == prev_text:
+            run_count += 1
         else:
-            repeat_count = 1
+            run_count = 1
             prev_text = text
+        # 연속 반복의 첫 번째만 유지
+        if run_count <= 1:
             result.append(s)
 
     return result
@@ -110,6 +99,7 @@ def _filter_language_mismatch(segments: list[dict], language: str) -> list[dict]
     for s in segments:
         text = s.get("text", "").strip()
         if not text:
+            result.append(s)
             continue
         # 해당 언어의 문자가 하나라도 있으면 OK
         if script_re.search(text):

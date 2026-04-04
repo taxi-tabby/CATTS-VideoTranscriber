@@ -266,6 +266,7 @@ def _subprocess_worker(params: dict, msg_queue: mp.Queue, cancel_event: mp.Event
                     "start": seg["start"] + time_offset + trim_offset_sec,
                     "end": seg["end"] + time_offset + trim_offset_sec,
                     "text": seg["text"].strip(),
+                    "no_speech_prob": seg.get("no_speech_prob", 0),
                 }
                 if seg.get("words"):
                     adjusted["words"] = [
