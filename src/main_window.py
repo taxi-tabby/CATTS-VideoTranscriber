@@ -1152,7 +1152,7 @@ class CorrectionDictDialog(QDialog):
 
         # ffmpeg으로 오디오 추출
         import tempfile
-        tmp_wav = os.path.join(tempfile.gettempdir(), f"vt_dict_{os.path.basename(filepath)}.wav")
+        tmp_wav = os.path.join(tempfile.gettempdir(), f"vt_dict_{os.getpid()}_{os.path.basename(filepath)}.wav")
         try:
             extract_audio(filepath, tmp_wav, get_ffmpeg_exe())
         except Exception as e:
@@ -1197,6 +1197,9 @@ class CorrectionDictDialog(QDialog):
             QApplication.processEvents()
 
         proc.join(timeout=5)
+        if proc.is_alive():
+            proc.kill()
+            proc.join(timeout=3)
         progress.close()
 
         # 임시 파일 정리

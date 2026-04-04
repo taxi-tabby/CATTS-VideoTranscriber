@@ -217,6 +217,9 @@ def _subprocess_worker(params: dict, msg_queue: mp.Queue, cancel_event: mp.Event
         else:
             correction_hint = ""
 
+        # 후처리/실시간 치환용: 교정된 항목만 (wrong != correct)
+        corrected_entries = [e for e in correction_entries if e.get("is_corrected") and e["wrong"] != e["correct"]]
+
         skip_samples = int(skip_seconds * SAMPLE_RATE) if skip_seconds > 0 else 0
         skip_sec = skip_seconds
 
@@ -270,8 +273,11 @@ def _subprocess_worker(params: dict, msg_queue: mp.Queue, cancel_event: mp.Event
                 chunk_end_sec = chunk_end / SAMPLE_RATE
                 chunk_corrections = [
                     e for e in correction_entries
-                    if e.get("is_corrected") and e.get("start_time") is not None
-                    and e["start_time"] < chunk_end_sec and e["end_time"] > chunk_start_sec
+                    if e.get("is_corrected")
+                    and e.get("start_time") is not None
+                    and e.get("end_time") is not None
+                    and e["start_time"] < chunk_end_sec
+                    and e["end_time"] > chunk_start_sec
                 ]
                 if chunk_corrections:
                     words = list(dict.fromkeys(e["correct"] for e in chunk_corrections))
@@ -320,9 +326,9 @@ def _subprocess_worker(params: dict, msg_queue: mp.Queue, cancel_event: mp.Event
                 all_segments[chunk_seg_start:] = matched
 
             for seg in all_segments[chunk_seg_start:]:
-                # 실시간 스트림에도 교정 사전 적용
-                if correction_entries:
-                    for entry in correction_entries:
+                # 실시간 스트림에도 교정 사전 적용 (교정된 항목만)
+                if corrected_entries:
+                    for entry in corrected_entries:
                         if entry["wrong"] in seg["text"]:
                             seg["text"] = seg["text"].replace(entry["wrong"], entry["correct"])
                 msg_queue.put(("segment", seg))
@@ -335,12 +341,12 @@ def _subprocess_worker(params: dict, msg_queue: mp.Queue, cancel_event: mp.Event
         if filtered_count > 0:
             _log(f"환각 필터: {filtered_count}개 세그먼트 제거 ({pre_filter_count} → {len(all_segments)})")
 
-        # 교정 사전 후처리: 잘못된 표현 → 올바른 표현 치환
-        if correction_entries:
+        # 교정 사전 후처리: 교정된 항목만 치환
+        if corrected_entries:
             replaced_count = 0
             for seg in all_segments:
                 original = seg["text"]
-                for entry in correction_entries:
+                for entry in corrected_entries:
                     if entry["wrong"] in seg["text"]:
                         seg["text"] = seg["text"].replace(entry["wrong"], entry["correct"])
                 if seg["text"] != original:

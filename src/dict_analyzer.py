@@ -75,7 +75,7 @@ def _analyze_worker(params: dict, msg_queue: mp.Queue, cancel_event: mp.Event) -
         if use_diar and hf_token:
             _progress(20, "화자 분석 중...")
             from src.diarizer import run_diarization
-            tmp_clean = os.path.join(tempfile.gettempdir(), "vt_dict_clean.wav")
+            tmp_clean = os.path.join(tempfile.gettempdir(), f"vt_dict_clean_{os.getpid()}.wav")
             save_numpy_as_wav(audio, tmp_clean)
             diarization_segments = run_diarization(
                 tmp_clean, hf_token,

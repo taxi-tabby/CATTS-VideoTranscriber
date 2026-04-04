@@ -4,14 +4,19 @@ from datetime import datetime
 
 
 def compute_file_checksum(filepath: str) -> str:
-    """파일의 SHA256 체크섬을 계산한다 (처음 10MB만 사용하여 빠르게)."""
+    """파일의 SHA256 체크섬을 계산한다 (처음 10MB + 마지막 1MB + 파일 크기)."""
     h = hashlib.sha256()
     with open(filepath, "rb") as f:
-        # 대용량 파일도 빠르게 처리하기 위해 처음 10MB + 파일 크기를 해시
-        data = f.read(10 * 1024 * 1024)
-        h.update(data)
+        # 처음 10MB
+        h.update(f.read(10 * 1024 * 1024))
+        # 파일 크기
         f.seek(0, 2)
-        h.update(str(f.tell()).encode())
+        file_size = f.tell()
+        h.update(str(file_size).encode())
+        # 마지막 1MB (편집된 파일 감지)
+        if file_size > 11 * 1024 * 1024:
+            f.seek(-1 * 1024 * 1024, 2)
+            h.update(f.read())
     return h.hexdigest()
 
 # 마이그레이션 목록: (버전, 설명, SQL 목록)
