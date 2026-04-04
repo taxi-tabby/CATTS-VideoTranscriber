@@ -126,6 +126,11 @@ def _subprocess_worker(params: dict, msg_queue: mp.Queue, cancel_event: mp.Event
         audio_duration = get_video_duration(audio)
         _log(f"전처리 완료 (트리밍 후: {audio_duration:.1f}초)")
 
+        # VAD로 음성 구간 검출 (청크 분할 + 화자분리 양쪽에서 사용)
+        from src.audio_preprocess import get_speech_segments, build_vad_chunks
+        speech_segments = get_speech_segments(audio)
+        _log(f"VAD 음성 구간: {len(speech_segments)}개")
+
         if _is_cancelled():
             return
 
@@ -197,22 +202,24 @@ def _subprocess_worker(params: dict, msg_queue: mp.Queue, cancel_event: mp.Event
 
         skip_samples = int(skip_seconds * SAMPLE_RATE) if skip_seconds > 0 else 0
         skip_sec = skip_seconds
-        if skip_samples > 0:
-            skipped = sum(1 for cs in range(0, total_samples, CHUNK_SAMPLES)
-                          if min(cs + CHUNK_SAMPLES, total_samples) <= skip_samples)
-            _log(f"이어하기: {skip_seconds:.1f}초 이전 청크 {skipped}개 건너뜀")
 
         transcribe_start = 22 if use_diar else 20
         transcribe_step = step_total
         lang_arg = language if language != "auto" else None
 
+        # VAD 기반 지능형 청크 분할 (무음 지점에서만 분할 → 환각 방지)
+        vad_chunks = build_vad_chunks(speech_segments, total_samples)
         single_chunks = []
-        for chunk_start in range(0, total_samples, CHUNK_SAMPLES):
-            chunk_end = min(chunk_start + CHUNK_SAMPLES, total_samples)
-            if skip_samples > 0 and chunk_end <= skip_samples:
+        for vc in vad_chunks:
+            cs, ce = vc["start_sample"], vc["end_sample"]
+            if skip_samples > 0 and ce <= skip_samples:
                 continue
-            single_chunks.append((chunk_start, chunk_end))
+            single_chunks.append((cs, ce))
         total_chunks = len(single_chunks)
+
+        if skip_samples > 0:
+            skipped = len(vad_chunks) - total_chunks
+            _log(f"이어하기: {skip_seconds:.1f}초 이전 청크 {skipped}개 건너뜀")
 
         _log(f"텍스트 변환 시작 (총 {total_chunks}개 청크, 언어: {language})")
 
@@ -278,6 +285,14 @@ def _subprocess_worker(params: dict, msg_queue: mp.Queue, cancel_event: mp.Event
 
             for seg in all_segments[chunk_seg_start:]:
                 msg_queue.put(("segment", seg))
+
+        # 환각 필터 적용 (반복, 언어 불일치, no_speech 등)
+        from src.hallucination_filter import filter_hallucinations
+        pre_filter_count = len(all_segments)
+        all_segments = filter_hallucinations(all_segments, language=language)
+        filtered_count = pre_filter_count - len(all_segments)
+        if filtered_count > 0:
+            _log(f"환각 필터: {filtered_count}개 세그먼트 제거 ({pre_filter_count} → {len(all_segments)})")
 
         # 최종 라벨 매핑
         if diarization_segments:
