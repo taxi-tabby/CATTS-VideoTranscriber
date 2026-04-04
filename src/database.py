@@ -1,5 +1,18 @@
+import hashlib
 import sqlite3
 from datetime import datetime
+
+
+def compute_file_checksum(filepath: str) -> str:
+    """파일의 SHA256 체크섬을 계산한다 (처음 10MB만 사용하여 빠르게)."""
+    h = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        # 대용량 파일도 빠르게 처리하기 위해 처음 10MB + 파일 크기를 해시
+        data = f.read(10 * 1024 * 1024)
+        h.update(data)
+        f.seek(0, 2)
+        h.update(str(f.tell()).encode())
+    return h.hexdigest()
 
 # 마이그레이션 목록: (버전, 설명, SQL 목록)
 # 버전은 1부터 순차적으로 증가. 새 마이그레이션은 맨 끝에 추가.
@@ -37,6 +50,15 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             correct TEXT NOT NULL
         )""",
         "CREATE INDEX IF NOT EXISTS idx_correction_entries_dict_id ON correction_entries(dict_id)",
+    ]),
+    (6, "교정 사전 미디어 체크섬 및 항목 타임스탬프 추가", [
+        "ALTER TABLE correction_dicts ADD COLUMN media_checksum TEXT",
+        "ALTER TABLE correction_dicts ADD COLUMN media_filename TEXT",
+        "ALTER TABLE correction_entries ADD COLUMN start_time REAL",
+        "ALTER TABLE correction_entries ADD COLUMN end_time REAL",
+        "ALTER TABLE correction_entries ADD COLUMN speaker TEXT",
+        "ALTER TABLE correction_entries ADD COLUMN frequency INTEGER DEFAULT 1",
+        "ALTER TABLE correction_entries ADD COLUMN is_corrected INTEGER DEFAULT 0",
     ]),
 ]
 
@@ -348,23 +370,42 @@ class Database:
 
     # ── 교정 사전 ──
 
-    def create_correction_dict(self, name: str) -> int:
+    def create_correction_dict(
+        self, name: str,
+        media_checksum: str | None = None,
+        media_filename: str | None = None,
+    ) -> int:
         cur = self._conn.execute(
-            "INSERT INTO correction_dicts (name, created_at) VALUES (?, ?)",
-            (name, datetime.now().isoformat()),
+            "INSERT INTO correction_dicts (name, created_at, media_checksum, media_filename) VALUES (?, ?, ?, ?)",
+            (name, datetime.now().isoformat(), media_checksum, media_filename),
         )
         self._conn.commit()
         return cur.lastrowid
 
     def list_correction_dicts(self) -> list[dict]:
         rows = self._conn.execute(
-            """SELECT d.id, d.name, d.created_at, COUNT(e.id) as entry_count
+            """SELECT d.id, d.name, d.created_at, d.media_checksum, d.media_filename,
+                      COUNT(e.id) as entry_count
                FROM correction_dicts d
                LEFT JOIN correction_entries e ON e.dict_id = d.id
                GROUP BY d.id
                ORDER BY d.name""",
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_correction_dict(self, dict_id: int) -> dict | None:
+        row = self._conn.execute(
+            "SELECT id, name, created_at, media_checksum, media_filename FROM correction_dicts WHERE id = ?",
+            (dict_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def update_correction_dict_checksum(self, dict_id: int, checksum: str) -> None:
+        self._conn.execute(
+            "UPDATE correction_dicts SET media_checksum = ? WHERE id = ?",
+            (checksum, dict_id),
+        )
+        self._conn.commit()
 
     def delete_correction_dict(self, dict_id: int) -> None:
         self._conn.execute("DELETE FROM correction_dicts WHERE id = ?", (dict_id,))
@@ -376,18 +417,42 @@ class Database:
         )
         self._conn.commit()
 
-    def add_correction_entry(self, dict_id: int, wrong: str, correct: str) -> int:
+    def add_correction_entry(
+        self, dict_id: int, wrong: str, correct: str,
+        start_time: float | None = None, end_time: float | None = None,
+        speaker: str | None = None, frequency: int = 1,
+        is_corrected: bool = False,
+    ) -> int:
         cur = self._conn.execute(
-            "INSERT INTO correction_entries (dict_id, wrong, correct) VALUES (?, ?, ?)",
-            (dict_id, wrong, correct),
+            """INSERT INTO correction_entries
+               (dict_id, wrong, correct, start_time, end_time, speaker, frequency, is_corrected)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (dict_id, wrong, correct, start_time, end_time, speaker, frequency, int(is_corrected)),
         )
         self._conn.commit()
         return cur.lastrowid
 
     def get_correction_entries(self, dict_id: int) -> list[dict]:
         rows = self._conn.execute(
-            "SELECT id, wrong, correct FROM correction_entries WHERE dict_id = ? ORDER BY wrong",
+            """SELECT id, wrong, correct, start_time, end_time, speaker, frequency, is_corrected
+               FROM correction_entries WHERE dict_id = ?
+               ORDER BY frequency DESC, wrong""",
             (dict_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_correction_entries_for_timerange(
+        self, dict_id: int, start: float, end: float,
+    ) -> list[dict]:
+        """시간 범위에 겹치는 교정 항목만 반환한다."""
+        rows = self._conn.execute(
+            """SELECT id, wrong, correct, start_time, end_time, speaker, frequency, is_corrected
+               FROM correction_entries
+               WHERE dict_id = ? AND is_corrected = 1
+                 AND start_time IS NOT NULL AND end_time IS NOT NULL
+                 AND start_time < ? AND end_time > ?
+               ORDER BY frequency DESC""",
+            (dict_id, end, start),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -406,8 +471,16 @@ class Database:
         """사전의 모든 항목을 원자적으로 교체한다 (트랜잭션)."""
         self._conn.execute("DELETE FROM correction_entries WHERE dict_id = ?", (dict_id,))
         self._conn.executemany(
-            "INSERT INTO correction_entries (dict_id, wrong, correct) VALUES (?, ?, ?)",
-            [(dict_id, e["wrong"], e["correct"]) for e in entries if e.get("wrong") and e.get("correct")],
+            """INSERT INTO correction_entries
+               (dict_id, wrong, correct, start_time, end_time, speaker, frequency, is_corrected)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (dict_id, e["wrong"], e["correct"],
+                 e.get("start_time"), e.get("end_time"),
+                 e.get("speaker"), e.get("frequency", 1),
+                 int(e.get("is_corrected", False)))
+                for e in entries if e.get("wrong") and e.get("correct")
+            ],
         )
         self._conn.commit()
 
