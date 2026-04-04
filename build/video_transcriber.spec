@@ -365,6 +365,8 @@ a = Analysis(
     datas=[
         (os.path.join(whisper_dir, 'assets'), 'whisper/assets'),
         (os.path.abspath('../assets/icon'), 'assets/icon'),
+        # demucs 모델 설정 파일 (remote/*.yaml, remote/files.txt)
+        (os.path.join(os.path.dirname(__import__('demucs').__file__), 'remote'), 'demucs/remote'),
         # large-v3 모델: WHISPER_MODEL_PATH 환경변수 또는 기본 캐시 경로에서 가져옴
         # 파일이 존재하지 않으면 번들에서 제외 (첫 실행 시 자동 다운로드)
         *([(_whisper_model_path, 'whisper_models')] if os.path.exists(_whisper_model_path := os.environ.get('WHISPER_MODEL_PATH', '') or os.path.join(os.path.expanduser('~'), '.cache', 'whisper', 'large-v3.pt')) else []),
