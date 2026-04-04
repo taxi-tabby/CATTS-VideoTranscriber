@@ -32,37 +32,7 @@ class TestGetAvailableMemoryMb:
         assert type(result) is int  # numpy.int64 등이 아닌 순수 int
 
 
-# ---------------------------------------------------------------------------
-# _force_release_ml_memory
-# ---------------------------------------------------------------------------
-
-class TestForceReleaseMlMemory:
-    def test_runs_without_error(self):
-        """에러 없이 실행되어야 한다 (어떤 플랫폼에서든)."""
-        from src.transcriber import _force_release_ml_memory
-        _force_release_ml_memory()  # should not raise
-
-    def test_unloads_ml_modules(self):
-        """ML 라이브러리가 sys.modules에서 제거되어야 한다."""
-        from src.transcriber import _force_release_ml_memory
-        # 테스트용 가짜 모듈 등록
-        sys.modules["whisper._test_dummy"] = MagicMock()
-        sys.modules["demucs._test_dummy"] = MagicMock()
-        sys.modules["pyannote._test_dummy"] = MagicMock()
-
-        _force_release_ml_memory()
-
-        assert "whisper._test_dummy" not in sys.modules
-        assert "demucs._test_dummy" not in sys.modules
-        assert "pyannote._test_dummy" not in sys.modules
-
-    def test_preserves_non_ml_modules(self):
-        """ML 외 모듈은 제거하지 않아야 한다."""
-        from src.transcriber import _force_release_ml_memory
-        assert "os" in sys.modules
-        _force_release_ml_memory()
-        assert "os" in sys.modules
-        assert "numpy" in sys.modules
+    # _force_release_ml_memory는 서브프로세스 방식 전환으로 제거됨 (dead code)
 
 
 # ---------------------------------------------------------------------------

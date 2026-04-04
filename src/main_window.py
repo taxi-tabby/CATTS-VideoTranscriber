@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -719,6 +720,18 @@ class TranscriptionSettingsDialog(QDialog):
         profile_layout.addWidget(self.combo_profile)
         layout.addWidget(grp_profile)
 
+        # ── 교정 사전 ──
+        grp_dict = QGroupBox("교정 사전")
+        dict_layout = QHBoxLayout(grp_dict)
+        self.combo_dict = QComboBox()
+        self.combo_dict.addItem("사용 안 함", None)
+        self._load_dict_list()
+        dict_layout.addWidget(self.combo_dict)
+        btn_manage_dict = QPushButton("관리...")
+        btn_manage_dict.clicked.connect(self._open_dict_manager)
+        dict_layout.addWidget(btn_manage_dict)
+        layout.addWidget(grp_dict)
+
         # ── 화자 분리 ──
         grp_diar = QGroupBox("화자 분리")
         diar_layout = QVBoxLayout(grp_diar)
@@ -940,7 +953,432 @@ class TranscriptionSettingsDialog(QDialog):
             "whisper_workers": whisper_workers,
             "diar_threads": diar_threads,
             "profile": profile,
+            "correction_dict_id": self.combo_dict.currentData(),
         }
+
+    def _load_dict_list(self):
+        """교정 사전 목록을 콤보박스에 로드한다."""
+        current_id = self.combo_dict.currentData()
+        self.combo_dict.clear()
+        self.combo_dict.addItem("사용 안 함", None)
+        try:
+            parent = self.parent()
+            if parent and hasattr(parent, "db"):
+                for d in parent.db.list_correction_dicts():
+                    label = f"{d['name']} ({d['entry_count']}개)"
+                    self.combo_dict.addItem(label, d["id"])
+        except Exception:
+            pass
+        for i in range(self.combo_dict.count()):
+            if self.combo_dict.itemData(i) == current_id:
+                self.combo_dict.setCurrentIndex(i)
+                break
+
+    def _open_dict_manager(self):
+        """교정 사전 관리 다이얼로그를 연다."""
+        parent = self.parent()
+        if not parent or not hasattr(parent, "db"):
+            return
+        dlg = CorrectionDictDialog(parent.db, self)
+        dlg.exec()
+        self._load_dict_list()
+
+
+class CorrectionDictDialog(QDialog):
+    """교정 사전 관리 다이얼로그."""
+
+    def __init__(self, db, parent=None):
+        super().__init__(parent)
+        self.db = db
+        self.setWindowTitle("교정 사전 관리")
+        self.setMinimumSize(800, 500)
+        self._build_ui()
+        self._refresh()
+
+    def _build_ui(self):
+        layout = QHBoxLayout(self)
+
+        # 왼쪽: 사전 목록
+        left = QVBoxLayout()
+        self.list_dicts = QListWidget()
+        self.list_dicts.currentRowChanged.connect(self._on_dict_selected)
+        left.addWidget(QLabel("사전 목록"))
+        left.addWidget(self.list_dicts)
+
+        btn_row = QHBoxLayout()
+        btn_analyze = QPushButton("미디어 분석으로 생성...")
+        btn_analyze.clicked.connect(self._analyze_media)
+        btn_row.addWidget(btn_analyze)
+        left.addLayout(btn_row)
+
+        btn_row2 = QHBoxLayout()
+        btn_add = QPushButton("+ 빈 사전")
+        btn_add.clicked.connect(self._add_dict)
+        btn_del = QPushButton("삭제")
+        btn_del.clicked.connect(self._delete_dict)
+        btn_row2.addWidget(btn_add)
+        btn_row2.addWidget(btn_del)
+        left.addLayout(btn_row2)
+        layout.addLayout(left, 1)
+
+        # 오른쪽: 사전 정보 + 항목
+        right = QVBoxLayout()
+
+        # 체크섬 정보
+        info_row = QHBoxLayout()
+        self.lbl_media = QLabel("미디어: —")
+        self.lbl_checksum = QLabel("체크섬: —")
+        self.lbl_checksum.setStyleSheet("color: gray; font-size: 11px;")
+        btn_change_checksum = QPushButton("체크섬 변경...")
+        btn_change_checksum.clicked.connect(self._change_checksum)
+        info_row.addWidget(self.lbl_media)
+        info_row.addStretch()
+        info_row.addWidget(btn_change_checksum)
+        right.addLayout(info_row)
+        right.addWidget(self.lbl_checksum)
+
+        # 항목 테이블 (화자, 인식된 단어, 교정, 빈도)
+        right.addWidget(QLabel("교정 항목 (빈도순 — '교정' 열을 편집하면 변환 시 적용됩니다)"))
+        self.table_entries = QTableWidget()
+        self.table_entries.setColumnCount(4)
+        self.table_entries.setHorizontalHeaderLabels(["화자", "인식된 단어", "교정", "빈도"])
+        header = self.table_entries.horizontalHeader()
+        header.setSectionResizeMode(0, header.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, header.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, header.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, header.ResizeMode.ResizeToContents)
+        self.table_entries.setSelectionBehavior(self.table_entries.SelectionBehavior.SelectRows)
+        self.table_entries.verticalHeader().setVisible(False)
+        right.addWidget(self.table_entries)
+
+        entry_btn_row = QHBoxLayout()
+        btn_add_entry = QPushButton("+ 항목 추가")
+        btn_add_entry.clicked.connect(self._add_entry)
+        btn_del_entry = QPushButton("항목 삭제")
+        btn_del_entry.clicked.connect(self._delete_entry)
+        btn_save = QPushButton("저장")
+        btn_save.clicked.connect(self._save_entries)
+        entry_btn_row.addWidget(btn_add_entry)
+        entry_btn_row.addWidget(btn_del_entry)
+        entry_btn_row.addStretch()
+        entry_btn_row.addWidget(btn_save)
+        right.addLayout(entry_btn_row)
+        layout.addLayout(right, 3)
+
+    def _refresh(self):
+        self.list_dicts.clear()
+        self._dicts = self.db.list_correction_dicts()
+        for d in self._dicts:
+            media = f" [{d.get('media_filename') or '수동'}]" if d.get('media_filename') else ""
+            self.list_dicts.addItem(f"{d['name']}{media} ({d['entry_count']}개)")
+        self.table_entries.setRowCount(0)
+        self.lbl_media.setText("미디어: —")
+        self.lbl_checksum.setText("체크섬: —")
+
+    def _current_dict_id(self):
+        row = self.list_dicts.currentRow()
+        if row < 0 or row >= len(self._dicts):
+            return None
+        return self._dicts[row]["id"]
+
+    def _on_dict_selected(self, row):
+        dict_id = self._current_dict_id()
+        if dict_id is None:
+            self.table_entries.setRowCount(0)
+            self.lbl_media.setText("미디어: —")
+            self.lbl_checksum.setText("체크섬: —")
+            return
+
+        d = self.db.get_correction_dict(dict_id)
+        if d:
+            self.lbl_media.setText(f"미디어: {d.get('media_filename') or '(없음)'}")
+            cs = d.get("media_checksum") or "—"
+            self.lbl_checksum.setText(f"체크섬: {cs[:16]}..." if len(cs) > 16 else f"체크섬: {cs}")
+
+        entries = self.db.get_correction_entries(dict_id)
+
+        # 고유 단어(화자+단어)별로 그룹화하여 UI에 표시
+        # DB에는 모든 등장 위치가 개별 행으로 있지만, UI에서는 1행만 표시
+        seen = {}  # (speaker, wrong) → row index
+        display_rows = []
+        for e in entries:
+            key = (e.get("speaker"), e["wrong"])
+            if key not in seen:
+                seen[key] = len(display_rows)
+                display_rows.append(e)
+
+        self.table_entries.setRowCount(len(display_rows))
+        for i, e in enumerate(display_rows):
+            speaker_item = QTableWidgetItem(e.get("speaker") or "—")
+            speaker_item.setFlags(speaker_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            wrong_item = QTableWidgetItem(e["wrong"])
+            correct_item = QTableWidgetItem(e["correct"])
+            freq_item = QTableWidgetItem(str(e.get("frequency", 1)))
+            freq_item.setFlags(freq_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+
+            wrong_item.setData(Qt.ItemDataRole.UserRole, e["id"])
+            wrong_item.setData(Qt.ItemDataRole.UserRole + 1, {
+                "speaker": e.get("speaker"),
+                "frequency": e.get("frequency", 1),
+                "is_corrected": e.get("is_corrected", 0),
+            })
+
+            self.table_entries.setItem(i, 0, speaker_item)
+            self.table_entries.setItem(i, 1, wrong_item)
+            self.table_entries.setItem(i, 2, correct_item)
+            self.table_entries.setItem(i, 3, freq_item)
+
+    def _analyze_media(self):
+        """미디어 파일을 선택하고 분석하여 사전을 생성한다."""
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "미디어 파일 선택", "",
+            "미디어 파일 (*.mp4 *.mkv *.avi *.mov *.webm *.mp3 *.wav *.flac *.m4a);;모든 파일 (*)",
+        )
+        if not filepath:
+            return
+
+        name, ok = QInputDialog.getText(
+            self, "사전 이름", "새 사전 이름:",
+            text=os.path.splitext(os.path.basename(filepath))[0],
+        )
+        if not ok or not name.strip():
+            return
+
+        # 모델/언어 선택
+        from src.config import get_whisper_model
+        models = ["tiny", "base", "small", "medium", "large-v3"]
+        current_model = get_whisper_model()
+        model_idx = models.index(current_model) if current_model in models else 3
+        model_name, ok = QInputDialog.getItem(
+            self, "분석 설정", "Whisper 모델:", models, model_idx, False,
+        )
+        if not ok:
+            return
+
+        languages = ["ko", "en", "ja", "zh", "auto"]
+        lang_labels = ["한국어", "English", "日本語", "中文", "자동 감지"]
+        lang, ok = QInputDialog.getItem(
+            self, "분석 설정", "언어:", lang_labels, 0, False,
+        )
+        if not ok:
+            return
+        language = languages[lang_labels.index(lang)]
+
+        from src.database import compute_file_checksum
+        checksum = compute_file_checksum(filepath)
+
+        # 진행 다이얼로그
+        from PySide6.QtWidgets import QProgressDialog
+        progress = QProgressDialog("미디어 분석 중...", "취소", 0, 100, self)
+        progress.setWindowTitle("사전 분석")
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        import multiprocessing as mp
+        from src.dict_analyzer import _analyze_worker
+        from src.transcriber import extract_audio, get_ffmpeg_exe
+
+        # ffmpeg으로 오디오 추출
+        import tempfile
+        tmp_wav = os.path.join(tempfile.gettempdir(), f"vt_dict_{os.getpid()}_{os.path.basename(filepath)}.wav")
+        try:
+            extract_audio(filepath, tmp_wav, get_ffmpeg_exe())
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"오디오 추출 실패: {e}")
+            return
+
+        ctx = mp.get_context("spawn")
+        msg_queue = ctx.Queue()
+        cancel_event = ctx.Event()
+
+        params = {
+            "wav_path": tmp_wav,
+            "model_name": model_name,
+            "language": language,
+            "use_diar": False,
+            "profile": "interview",
+        }
+
+        proc = ctx.Process(target=_analyze_worker, args=(params, msg_queue, cancel_event), daemon=True)
+        proc.start()
+
+        result_data = None
+        while proc.is_alive() or not msg_queue.empty():
+            if progress.wasCanceled():
+                cancel_event.set()
+                proc.join(timeout=10)
+                break
+            try:
+                msg = msg_queue.get(timeout=0.1)
+            except Exception:
+                QApplication.processEvents()
+                continue
+
+            if msg[0] == "progress":
+                progress.setValue(msg[1])
+                progress.setLabelText(msg[2])
+            elif msg[0] == "result":
+                result_data = msg[1]
+            elif msg[0] == "error":
+                QMessageBox.critical(self, "분석 오류", msg[1])
+                break
+            QApplication.processEvents()
+
+        proc.join(timeout=5)
+        if proc.is_alive():
+            proc.kill()
+            proc.join(timeout=3)
+        progress.close()
+
+        # 임시 파일 정리
+        try:
+            os.remove(tmp_wav)
+        except OSError:
+            pass
+
+        if not result_data:
+            return
+
+        # DB에 사전 생성 + 항목 저장
+        dict_id = self.db.create_correction_dict(
+            name.strip(),
+            media_checksum=checksum,
+            media_filename=os.path.basename(filepath),
+        )
+
+        entries = []
+        for w in result_data["words"]:
+            entries.append({
+                "wrong": w["word"],
+                "correct": w["word"],  # 초기에는 동일 (사용자가 교정)
+                "start_time": w["start"],
+                "end_time": w["end"],
+                "speaker": w.get("speaker"),
+                "frequency": w["frequency"],
+                "is_corrected": False,
+            })
+        self.db.replace_correction_entries(dict_id, entries)
+
+        self._refresh()
+        # 새로 만든 사전 선택
+        for i in range(self.list_dicts.count()):
+            if i < len(self._dicts) and self._dicts[i]["id"] == dict_id:
+                self.list_dicts.setCurrentRow(i)
+                break
+
+    def _change_checksum(self):
+        dict_id = self._current_dict_id()
+        if dict_id is None:
+            return
+        # 파일 선택 또는 직접 입력
+        choice = QMessageBox.question(
+            self, "체크섬 변경",
+            "파일을 선택하여 체크섬을 계산하시겠습니까?\n\n'아니오'를 선택하면 직접 입력할 수 있습니다.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+        )
+        if choice == QMessageBox.StandardButton.Cancel:
+            return
+        elif choice == QMessageBox.StandardButton.Yes:
+            filepath, _ = QFileDialog.getOpenFileName(self, "미디어 파일 선택")
+            if not filepath:
+                return
+            from src.database import compute_file_checksum
+            new_checksum = compute_file_checksum(filepath)
+        else:
+            new_checksum, ok = QInputDialog.getText(self, "체크섬 입력", "새 체크섬 값:")
+            if not ok or not new_checksum.strip():
+                return
+            new_checksum = new_checksum.strip()
+
+        self.db.update_correction_dict_checksum(dict_id, new_checksum)
+        self._on_dict_selected(self.list_dicts.currentRow())
+
+    def _add_dict(self):
+        name, ok = QInputDialog.getText(self, "새 사전", "사전 이름:")
+        if ok and name.strip():
+            self.db.create_correction_dict(name.strip())
+            self._refresh()
+            self.list_dicts.setCurrentRow(self.list_dicts.count() - 1)
+
+    def _delete_dict(self):
+        dict_id = self._current_dict_id()
+        if dict_id is None:
+            return
+        if QMessageBox.question(self, "삭제", "이 사전을 삭제하시겠습니까?") == QMessageBox.StandardButton.Yes:
+            self.db.delete_correction_dict(dict_id)
+            self._refresh()
+
+    def _add_entry(self):
+        dict_id = self._current_dict_id()
+        if dict_id is None:
+            return
+        row = self.table_entries.rowCount()
+        self.table_entries.insertRow(row)
+        self.table_entries.setItem(row, 0, QTableWidgetItem("—"))
+        self.table_entries.setItem(row, 1, QTableWidgetItem(""))
+        self.table_entries.setItem(row, 2, QTableWidgetItem(""))
+        self.table_entries.setItem(row, 3, QTableWidgetItem("1"))
+        self.table_entries.editItem(self.table_entries.item(row, 1))
+
+    def _delete_entry(self):
+        rows = set(idx.row() for idx in self.table_entries.selectedIndexes())
+        for row in sorted(rows, reverse=True):
+            item = self.table_entries.item(row, 1)
+            entry_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+            if entry_id:
+                self.db.delete_correction_entry(entry_id)
+            self.table_entries.removeRow(row)
+
+    def _save_entries(self):
+        dict_id = self._current_dict_id()
+        if dict_id is None:
+            return
+
+        # UI에서 편집된 교정 매핑 수집: (speaker, wrong) → correct
+        correction_map = {}
+        for row in range(self.table_entries.rowCount()):
+            wrong_item = self.table_entries.item(row, 1)
+            wrong = (wrong_item.text() if wrong_item else "").strip()
+            correct_item = self.table_entries.item(row, 2)
+            correct = (correct_item.text() if correct_item else "").strip()
+            if not wrong or not correct:
+                continue
+            meta = wrong_item.data(Qt.ItemDataRole.UserRole + 1) or {}
+            key = (meta.get("speaker"), wrong)
+            correction_map[key] = correct
+
+        # DB의 모든 항목을 가져와서 교정 매핑 적용 (모든 등장 위치에 일괄)
+        all_entries = self.db.get_correction_entries(dict_id)
+        updated = []
+        for e in all_entries:
+            key = (e.get("speaker"), e["wrong"])
+            if key in correction_map:
+                e["correct"] = correction_map[key]
+                e["is_corrected"] = e["wrong"] != e["correct"]
+            updated.append(e)
+
+        # 수동 추가 항목 (DB에 없는 것) 처리
+        existing_keys = {(e.get("speaker"), e["wrong"]) for e in all_entries}
+        for row in range(self.table_entries.rowCount()):
+            wrong_item = self.table_entries.item(row, 1)
+            wrong = (wrong_item.text() if wrong_item else "").strip()
+            correct_item = self.table_entries.item(row, 2)
+            correct = (correct_item.text() if correct_item else "").strip()
+            if not wrong or not correct:
+                continue
+            meta = wrong_item.data(Qt.ItemDataRole.UserRole + 1) or {}
+            key = (meta.get("speaker"), wrong)
+            if key not in existing_keys:
+                updated.append({
+                    "wrong": wrong,
+                    "correct": correct,
+                    "speaker": meta.get("speaker"),
+                    "frequency": meta.get("frequency", 1),
+                    "is_corrected": wrong != correct,
+                })
+
+        self.db.replace_correction_entries(dict_id, updated)
+        self._on_dict_selected(self.list_dicts.currentRow())
 
 
 # ────────────────────────────────────────────
@@ -978,6 +1416,13 @@ class MainWindow(QMainWindow):
         self._setup_tray_icon()
         self._setup_shortcuts()
         self._load_list()
+
+        # 이전 업데이트 잔여 파일 정리
+        try:
+            from src.updater import cleanup_old_update
+            cleanup_old_update()
+        except Exception:
+            pass
 
         self._version_thread = VersionCheckThread()
         self._version_thread.finished.connect(self._on_version_checked)
@@ -1078,17 +1523,95 @@ class MainWindow(QMainWindow):
             self._show_update_dialog(current, latest)
 
     def _show_update_dialog(self, current: int, latest: int):
+        from src.updater import can_auto_update, check_for_update
+
         msg = QMessageBox(self)
         msg.setWindowTitle("업데이트 안내")
         msg.setIcon(QMessageBox.Icon.Information)
         msg.setText(f"새 버전이 있습니다: v{latest} (현재 v{current})")
-        msg.setInformativeText("다운로드 페이지로 이동하시겠습니까?")
-        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        msg.setDefaultButton(QMessageBox.StandardButton.Yes)
-        msg.button(QMessageBox.StandardButton.Yes).setText("다운로드 페이지 열기")
-        msg.button(QMessageBox.StandardButton.No).setText("나중에")
-        if msg.exec() == QMessageBox.StandardButton.Yes:
+
+        if can_auto_update():
+            msg.setInformativeText("지금 자동으로 업데이트하시겠습니까?")
+            msg.setStandardButtons(
+                QMessageBox.StandardButton.Yes |
+                QMessageBox.StandardButton.No |
+                QMessageBox.StandardButton.Open
+            )
+            msg.button(QMessageBox.StandardButton.Yes).setText("자동 업데이트")
+            msg.button(QMessageBox.StandardButton.Open).setText("다운로드 페이지")
+            msg.button(QMessageBox.StandardButton.No).setText("나중에")
+            msg.setDefaultButton(QMessageBox.StandardButton.Yes)
+        else:
+            msg.setInformativeText("다운로드 페이지로 이동하시겠습니까?")
+            msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            msg.button(QMessageBox.StandardButton.Yes).setText("다운로드 페이지 열기")
+            msg.button(QMessageBox.StandardButton.No).setText("나중에")
+            msg.setDefaultButton(QMessageBox.StandardButton.Yes)
+
+        choice = msg.exec()
+
+        if choice == QMessageBox.StandardButton.Yes and can_auto_update():
+            self._run_auto_update()
+        elif choice == QMessageBox.StandardButton.Yes or choice == QMessageBox.StandardButton.Open:
             QDesktopServices.openUrl(QUrl(RELEASES_PAGE))
+
+    def _run_auto_update(self):
+        """자동 업데이트: 다운로드 → 설치 → 재시작."""
+        from src.updater import check_for_update, download_update, prepare_update, apply_update_and_restart
+        from PySide6.QtWidgets import QProgressDialog
+
+        update_info = check_for_update()
+        if not update_info:
+            QMessageBox.information(self, "업데이트", "이미 최신 버전입니다.")
+            return
+
+        progress = QProgressDialog(
+            f"v{update_info['version']} 다운로드 중...", "취소", 0, 100, self
+        )
+        progress.setWindowTitle("자동 업데이트")
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        cancelled = False
+
+        def _on_progress(pct):
+            nonlocal cancelled
+            if progress.wasCanceled():
+                cancelled = True
+            progress.setValue(pct)
+            QApplication.processEvents()
+
+        try:
+            downloaded = download_update(
+                update_info["download_url"],
+                update_info["size"],
+                progress_callback=_on_progress,
+            )
+
+            if cancelled:
+                progress.close()
+                return
+
+            progress.setLabelText("업데이트 준비 중...")
+            progress.setValue(95)
+            QApplication.processEvents()
+
+            staging = prepare_update(downloaded)
+
+            progress.close()
+
+            reply = QMessageBox.question(
+                self, "업데이트 설치",
+                f"v{update_info['version']} 다운로드 완료.\n"
+                f"앱을 종료하고 업데이트를 설치하시겠습니까?",
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                apply_update_and_restart(staging)
+            # else: staging은 다음에 cleanup_old_update에서 정리됨
+
+        except Exception as e:
+            progress.close()
+            QMessageBox.critical(self, "업데이트 오류", f"업데이트 실패: {e}")
 
     # ── 시스템 트레이 아이콘 (Feature 7) ──
 
@@ -1109,10 +1632,7 @@ class MainWindow(QMainWindow):
     # ── 키보드 단축키 ──
 
     def _setup_shortcuts(self):
-        QShortcut(QKeySequence("Ctrl+O"), self, self._on_add_video)
-        QShortcut(QKeySequence("Ctrl+S"), self, self._on_export)
-        QShortcut(QKeySequence("Ctrl+C"), self, self._on_copy)
-        QShortcut(QKeySequence("Delete"), self, self._on_delete)
+        # 메뉴바에 없는 단축키만 여기서 등록 (메뉴 항목은 메뉴에서 setShortcut)
         QShortcut(QKeySequence("Ctrl+F"), self, self._focus_timeline_search)
 
     def _focus_timeline_search(self):
@@ -1122,7 +1642,104 @@ class MainWindow(QMainWindow):
 
     # ── UI 빌드 ──
 
+    def _build_menubar(self):
+        menubar = self.menuBar()
+
+        # ── 파일 ──
+        file_menu = menubar.addMenu("파일")
+
+        act_add = file_menu.addAction("미디어 파일 추가...")
+        act_add.setShortcut("Ctrl+O")
+        act_add.triggered.connect(self._on_add_video)
+
+        act_export = file_menu.addAction("내보내기...")
+        act_export.setShortcut("Ctrl+S")
+        act_export.triggered.connect(self._on_export)
+
+        file_menu.addSeparator()
+
+        act_delete = file_menu.addAction("선택 항목 삭제")
+        act_delete.setShortcut("Delete")
+        act_delete.triggered.connect(self._on_delete)
+
+        file_menu.addSeparator()
+
+        act_quit = file_menu.addAction("종료")
+        act_quit.setShortcut("Ctrl+Q")
+        act_quit.triggered.connect(self.close)
+
+        # ── 편집 ──
+        edit_menu = menubar.addMenu("편집")
+
+        act_copy = edit_menu.addAction("텍스트 복사")
+        act_copy.setShortcut("Ctrl+Shift+C")
+        act_copy.triggered.connect(self._on_copy)
+
+        act_search = edit_menu.addAction("타임라인 검색")
+        act_search.setShortcut("Ctrl+F")
+        act_search.triggered.connect(self._focus_timeline_search)
+
+        # ── 도구 ──
+        tools_menu = menubar.addMenu("도구")
+
+        act_dict = tools_menu.addAction("교정 사전 관리...")
+        act_dict.triggered.connect(self._open_dict_manager)
+
+        tools_menu.addSeparator()
+
+        act_settings = tools_menu.addAction("설정...")
+        act_settings.setShortcut("Ctrl+,")
+        act_settings.triggered.connect(self._on_settings)
+
+        # ── 도움말 ──
+        help_menu = menubar.addMenu("도움말")
+
+        act_update = help_menu.addAction("업데이트 확인...")
+        act_update.triggered.connect(self._check_update_manual)
+
+        act_guide = help_menu.addAction("시작 안내")
+        act_guide.triggered.connect(self._show_startup_guide)
+
+        help_menu.addSeparator()
+
+        act_about = help_menu.addAction("프로그램 정보")
+        act_about.triggered.connect(self._show_about)
+
+    def _open_dict_manager(self):
+        """메인 윈도우에서 교정 사전 관리 다이얼로그를 연다."""
+        dlg = CorrectionDictDialog(self.db, self)
+        dlg.exec()
+
+    def _check_update_manual(self):
+        """수동 업데이트 확인."""
+        from src.updater import check_for_update, can_auto_update
+        try:
+            update_info = check_for_update()
+        except Exception as e:
+            QMessageBox.warning(self, "업데이트 확인", f"확인 실패: {e}")
+            return
+
+        if update_info:
+            current = int(QApplication.instance().applicationVersion())
+            self._show_update_dialog(current, update_info["version"])
+        else:
+            QMessageBox.information(self, "업데이트 확인", "현재 최신 버전입니다.")
+
+    def _show_about(self):
+        version = QApplication.instance().applicationVersion()
+        QMessageBox.about(
+            self, "프로그램 정보",
+            f"<h3>CATTS - Video Transcriber</h3>"
+            f"<p>버전: {version}</p>"
+            f"<p>영상/음성에서 텍스트를 추출하는 프로그램</p>"
+            f"<p>Whisper + pyannote + Demucs 기반</p>"
+            f"<hr>"
+            f"<p><a href='https://github.com/taxi-tabby/CATTS-VideoTranscriber'>GitHub</a></p>",
+        )
+
     def _build_ui(self):
+        self._build_menubar()
+
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
@@ -1426,9 +2043,10 @@ class MainWindow(QMainWindow):
             if item:
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
 
-        # 전체 텍스트도 편집 가능하게
-        self.txt_fulltext.setReadOnly(False)
-        self.txt_fulltext.setStyleSheet("QPlainTextEdit { border: 2px solid #4CAF50; }")
+        # 전체 텍스트는 편집 비활성화 (타임라인 편집만 지원, 저장 시 자동 재생성)
+        self.txt_fulltext.setReadOnly(True)
+        self.txt_fulltext.setStyleSheet("QPlainTextEdit { border: 2px solid #888; opacity: 0.7; }")
+        self.txt_fulltext.setPlaceholderText("타임라인에서 텍스트를 편집하면 전체 텍스트가 자동으로 갱신됩니다.")
 
     def _on_save_edit(self):
         if self._current_tid is None:
@@ -1554,7 +2172,6 @@ class MainWindow(QMainWindow):
             if idx >= 0:
                 self.tree_widget.takeTopLevelItem(idx)
             self._live_item = None
-            self.tree_widget.setEnabled(True)
             self._glow.stop()
 
     # ── 컨텍스트 메뉴 ──
@@ -1665,6 +2282,23 @@ class MainWindow(QMainWindow):
             self._show_detail(False)
             return
 
+        # 편집 중이면 저장 여부 확인
+        if self._editing:
+            reply = QMessageBox.question(
+                self, "편집 중",
+                "저장하지 않은 편집 내용이 있습니다. 저장하시겠습니까?",
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+            )
+            if reply == QMessageBox.StandardButton.Save:
+                self._on_save_edit()
+            elif reply == QMessageBox.StandardButton.Cancel:
+                self.tree_widget.blockSignals(True)
+                self.tree_widget.setCurrentItem(_previous)
+                self.tree_widget.blockSignals(False)
+                return
+            else:
+                self._cancel_edit_mode()
+
         # "변환 중" 항목 선택 → 라이브 데이터 복원
         if current is self._live_item:
             self._current_tid = None
@@ -1772,6 +2406,27 @@ class MainWindow(QMainWindow):
 
     # ── 변환 시작/대기열 (Feature 2) ──
 
+    def _load_correction_entries(self, dict_id, video_path: str = "") -> list:
+        """교정 사전 ID로 항목을 로드한다. 체크섬 불일치 시 빈 리스트."""
+        if dict_id is None:
+            return []
+        try:
+            d = self.db.get_correction_dict(dict_id)
+            if not d:
+                return []
+            # 체크섬 검증 (체크섬이 있는 사전만)
+            if d.get("media_checksum") and video_path:
+                from src.database import compute_file_checksum
+                file_checksum = compute_file_checksum(video_path)
+                if file_checksum != d["media_checksum"]:
+                    self._on_log_message(
+                        f"⚠ 교정 사전 '{d['name']}'의 체크섬이 불일치합니다. 사전을 적용하지 않습니다."
+                    )
+                    return []
+            return self.db.get_correction_entries(dict_id)
+        except Exception:
+            return []
+
     def _start_transcription(
         self, video_path: str, settings: dict, hf_token: str | None = None,
         resume_tid: int | None = None, skip_seconds: float = 0.0,
@@ -1796,7 +2451,6 @@ class MainWindow(QMainWindow):
         self._live_item.setData(0, Qt.ItemDataRole.UserRole + 1, "live")
         self.tree_widget.insertTopLevelItem(0, self._live_item)
         self.tree_widget.setCurrentItem(self._live_item)
-        self.tree_widget.setEnabled(False)
         self._glow.setGeometry(self.centralWidget().rect())
         self._glow.start()
 
@@ -1841,6 +2495,7 @@ class MainWindow(QMainWindow):
             diar_threads=settings.get("diar_threads", 1),
             skip_seconds=skip_seconds,
             profile=settings.get("profile", "interview"),
+            correction_entries=self._load_correction_entries(settings.get("correction_dict_id"), video_path),
         )
         self._worker.moveToThread(self._thread)
 
