@@ -62,20 +62,55 @@ SAMPLE_RATE = 16000
 CHUNK_SECONDS = 30
 
 
-def _trim_process_memory() -> None:
-    """OS에 사용하지 않는 힙 메모리를 반환하도록 요청한다.
+def _force_release_ml_memory() -> None:
+    """ML 모델/텐서 관련 메모리를 강제로 해제한다.
 
-    Python/PyTorch는 free() 후에도 메모리를 프로세스에 유지하는 경우가 많다.
-    Windows에서는 SetProcessWorkingSetSize로 워킹셋을 트림하고,
-    Linux에서는 malloc_trim으로 힙을 반환한다.
+    Python/PyTorch는 del + gc.collect() 후에도 수 GB의 메모리를 유지한다.
+    이는 PyTorch 내부 캐시, C 런타임의 힙 관리, 모듈 레벨 전역 변수 등 때문이다.
+
+    이 함수는:
+    1. torch 관련 캐시를 모두 비운다
+    2. gc를 여러 차례 실행하여 순환 참조를 해제한다
+    3. ML 라이브러리를 sys.modules에서 제거하여 모듈 레벨 참조를 끊는다
+    4. OS에 메모리 반환을 요청한다
     """
     import sys
+
+    gc.collect()
+    gc.collect()
+
+    # torch 캐시 해제
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except Exception:
+        pass
+
+    gc.collect()
+
+    # ML 라이브러리를 sys.modules에서 제거 — 모듈 레벨 캐시/전역 변수 해제
+    _unload_prefixes = (
+        "whisper", "demucs", "openunmix",
+        "pyannote", "speechbrain",
+        "asteroid_filterbanks",
+    )
+    for mod_name in list(sys.modules.keys()):
+        if any(mod_name.startswith(p) for p in _unload_prefixes):
+            del sys.modules[mod_name]
+
+    gc.collect()
+    gc.collect()
+
+    # OS에 미사용 힙 메모리 반환 요청
     try:
         if sys.platform == "win32":
             import ctypes
-            # 현재 프로세스의 워킹셋을 최소화 → OS가 미사용 페이지 회수
-            handle = ctypes.windll.kernel32.GetCurrentProcess()
-            ctypes.windll.kernel32.SetProcessWorkingSetSize(handle, -1, -1)
+            ctypes.windll.kernel32.SetProcessWorkingSetSize(
+                ctypes.windll.kernel32.GetCurrentProcess(),
+                ctypes.c_size_t(-1), ctypes.c_size_t(-1),
+            )
         else:
             import ctypes
             libc = ctypes.CDLL("libc.so.6")
@@ -497,15 +532,10 @@ class TranscriberWorker(QObject):
                 finally:
                     _torch.set_num_threads(_orig_threads)
 
-                # 원본 오디오 배열 해제
+                # 원본 오디오 배열 해제 (finally에서 _force_release_ml_memory 호출됨)
                 del audio
-                # 워커 모델 메모리 해제
                 del _worker_models
                 del _thread_local
-                _heavy_refs.clear()
-                gc.collect()
-                if _torch.cuda.is_available():
-                    _torch.cuda.empty_cache()
                 self._log("워커 모델 메모리 해제 완료")
 
                 if failed_chunks:
@@ -642,14 +672,9 @@ class TranscriberWorker(QObject):
                     for seg in all_segments[chunk_seg_start:]:
                         self.segment_ready.emit(seg)
 
-                # 싱글스레드 완료 후 모델/오디오 해제
+                # 싱글스레드 완료 후 모델/오디오 해제 (finally에서 _force_release_ml_memory 호출됨)
                 del model
                 del audio
-                _heavy_refs.clear()
-                gc.collect()
-                import torch as _torch_single
-                if _torch_single.cuda.is_available():
-                    _torch_single.cuda.empty_cache()
 
             # 최종 한글 라벨 매핑
             if diarization_segments:
@@ -697,24 +722,9 @@ class TranscriberWorker(QObject):
             self.error.emit(str(e))
         finally:
             # ── 메모리 정리 ──
-            # 대용량 객체(모델, 오디오 배열 등)를 명시적으로 해제한다.
-            for name in list(_heavy_refs.keys()):
-                try:
-                    del _heavy_refs[name]
-                except Exception:
-                    pass
             _heavy_refs.clear()
-
-            gc.collect()
-            try:
-                import torch as _torch_cleanup
-                if _torch_cleanup.cuda.is_available():
-                    _torch_cleanup.cuda.empty_cache()
-            except Exception:
-                pass
-
-            # Python/C 런타임이 OS에 메모리를 반환하도록 강제 트림
-            _trim_process_memory()
+            _force_release_ml_memory()
+            self._log("메모리 정리 완료")
 
             if tmp_wav and os.path.exists(tmp_wav):
                 try:
