@@ -522,32 +522,21 @@ jobs:
           VERSION="${{ needs.version.outputs.tag }}"
           DMG_NAME="CATTS-${VERSION}-macOS-arm64.dmg"
 
-          # 임시 DMG 디렉토리 구성
-          mkdir -p dmg_content
-          cp -R build/output/dist/CATTS.app dmg_content/
-          ln -s /Applications dmg_content/Applications
+          # create-dmg로 예쁜 DMG 생성 (배경, 아이콘 배치, Applications 바로가기)
+          brew install create-dmg
 
-          # 설치 안내 파일
-          cat > dmg_content/설치방법.txt << 'GUIDE'
-          CATTS 설치 방법
-          ===============
-
-          1. CATTS.app을 Applications 폴더로 드래그하세요.
-
-          2. 처음 실행 시 "확인되지 않은 개발자" 경고가 나타나면:
-             - CATTS.app을 우클릭(또는 Control+클릭) → "열기" 선택
-             - "열기" 버튼 클릭
-
-          3. 또는 터미널에서 아래 명령어를 실행하세요:
-             xattr -cr /Applications/CATTS.app
-          GUIDE
-          sed -i '' 's/^          //' dmg_content/설치방법.txt
-
-          # DMG 생성
-          hdiutil create -volname "CATTS ${VERSION}" \
-            -srcfolder dmg_content \
-            -ov -format UDZO \
-            "${DMG_NAME}"
+          create-dmg \
+            --volname "CATTS ${VERSION}" \
+            --volicon "assets/icon/app.icns" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "CATTS.app" 150 185 \
+            --app-drop-link 450 185 \
+            --text-size 14 \
+            --hide-extension "CATTS.app" \
+            "${DMG_NAME}" \
+            "build/output/dist/CATTS.app"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
