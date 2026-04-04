@@ -1417,6 +1417,13 @@ class MainWindow(QMainWindow):
         self._setup_shortcuts()
         self._load_list()
 
+        # 이전 업데이트 잔여 파일 정리
+        try:
+            from src.updater import cleanup_old_update
+            cleanup_old_update()
+        except Exception:
+            pass
+
         self._version_thread = VersionCheckThread()
         self._version_thread.finished.connect(self._on_version_checked)
         self._version_thread.start()
@@ -1516,17 +1523,95 @@ class MainWindow(QMainWindow):
             self._show_update_dialog(current, latest)
 
     def _show_update_dialog(self, current: int, latest: int):
+        from src.updater import can_auto_update, check_for_update
+
         msg = QMessageBox(self)
         msg.setWindowTitle("업데이트 안내")
         msg.setIcon(QMessageBox.Icon.Information)
         msg.setText(f"새 버전이 있습니다: v{latest} (현재 v{current})")
-        msg.setInformativeText("다운로드 페이지로 이동하시겠습니까?")
-        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        msg.setDefaultButton(QMessageBox.StandardButton.Yes)
-        msg.button(QMessageBox.StandardButton.Yes).setText("다운로드 페이지 열기")
-        msg.button(QMessageBox.StandardButton.No).setText("나중에")
-        if msg.exec() == QMessageBox.StandardButton.Yes:
+
+        if can_auto_update():
+            msg.setInformativeText("지금 자동으로 업데이트하시겠습니까?")
+            msg.setStandardButtons(
+                QMessageBox.StandardButton.Yes |
+                QMessageBox.StandardButton.No |
+                QMessageBox.StandardButton.Open
+            )
+            msg.button(QMessageBox.StandardButton.Yes).setText("자동 업데이트")
+            msg.button(QMessageBox.StandardButton.Open).setText("다운로드 페이지")
+            msg.button(QMessageBox.StandardButton.No).setText("나중에")
+            msg.setDefaultButton(QMessageBox.StandardButton.Yes)
+        else:
+            msg.setInformativeText("다운로드 페이지로 이동하시겠습니까?")
+            msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            msg.button(QMessageBox.StandardButton.Yes).setText("다운로드 페이지 열기")
+            msg.button(QMessageBox.StandardButton.No).setText("나중에")
+            msg.setDefaultButton(QMessageBox.StandardButton.Yes)
+
+        choice = msg.exec()
+
+        if choice == QMessageBox.StandardButton.Yes and can_auto_update():
+            self._run_auto_update()
+        elif choice == QMessageBox.StandardButton.Yes or choice == QMessageBox.StandardButton.Open:
             QDesktopServices.openUrl(QUrl(RELEASES_PAGE))
+
+    def _run_auto_update(self):
+        """자동 업데이트: 다운로드 → 설치 → 재시작."""
+        from src.updater import check_for_update, download_update, prepare_update, apply_update_and_restart
+        from PySide6.QtWidgets import QProgressDialog
+
+        update_info = check_for_update()
+        if not update_info:
+            QMessageBox.information(self, "업데이트", "이미 최신 버전입니다.")
+            return
+
+        progress = QProgressDialog(
+            f"v{update_info['version']} 다운로드 중...", "취소", 0, 100, self
+        )
+        progress.setWindowTitle("자동 업데이트")
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        cancelled = False
+
+        def _on_progress(pct):
+            nonlocal cancelled
+            if progress.wasCanceled():
+                cancelled = True
+            progress.setValue(pct)
+            QApplication.processEvents()
+
+        try:
+            downloaded = download_update(
+                update_info["download_url"],
+                update_info["size"],
+                progress_callback=_on_progress,
+            )
+
+            if cancelled:
+                progress.close()
+                return
+
+            progress.setLabelText("업데이트 준비 중...")
+            progress.setValue(95)
+            QApplication.processEvents()
+
+            staging = prepare_update(downloaded)
+
+            progress.close()
+
+            reply = QMessageBox.question(
+                self, "업데이트 설치",
+                f"v{update_info['version']} 다운로드 완료.\n"
+                f"앱을 종료하고 업데이트를 설치하시겠습니까?",
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                apply_update_and_restart(staging)
+            # else: staging은 다음에 cleanup_old_update에서 정리됨
+
+        except Exception as e:
+            progress.close()
+            QMessageBox.critical(self, "업데이트 오류", f"업데이트 실패: {e}")
 
     # ── 시스템 트레이 아이콘 (Feature 7) ──
 
@@ -1609,6 +1694,9 @@ class MainWindow(QMainWindow):
         # ── 도움말 ──
         help_menu = menubar.addMenu("도움말")
 
+        act_update = help_menu.addAction("업데이트 확인...")
+        act_update.triggered.connect(self._check_update_manual)
+
         act_guide = help_menu.addAction("시작 안내")
         act_guide.triggered.connect(self._show_startup_guide)
 
@@ -1621,6 +1709,21 @@ class MainWindow(QMainWindow):
         """메인 윈도우에서 교정 사전 관리 다이얼로그를 연다."""
         dlg = CorrectionDictDialog(self.db, self)
         dlg.exec()
+
+    def _check_update_manual(self):
+        """수동 업데이트 확인."""
+        from src.updater import check_for_update, can_auto_update
+        try:
+            update_info = check_for_update()
+        except Exception as e:
+            QMessageBox.warning(self, "업데이트 확인", f"확인 실패: {e}")
+            return
+
+        if update_info:
+            current = int(QApplication.instance().applicationVersion())
+            self._show_update_dialog(current, update_info["version"])
+        else:
+            QMessageBox.information(self, "업데이트 확인", "현재 최신 버전입니다.")
 
     def _show_about(self):
         version = QApplication.instance().applicationVersion()
