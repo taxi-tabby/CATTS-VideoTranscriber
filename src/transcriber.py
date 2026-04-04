@@ -326,11 +326,6 @@ def _subprocess_worker(params: dict, msg_queue: mp.Queue, cancel_event: mp.Event
                 all_segments[chunk_seg_start:] = matched
 
             for seg in all_segments[chunk_seg_start:]:
-                # 실시간 스트림에도 교정 사전 적용 (교정된 항목만)
-                if corrected_entries:
-                    for entry in corrected_entries:
-                        if entry["wrong"] in seg["text"]:
-                            seg["text"] = seg["text"].replace(entry["wrong"], entry["correct"])
                 msg_queue.put(("segment", seg))
 
         # 환각 필터 적용 (반복, 언어 불일치, no_speech 등)
@@ -591,7 +586,7 @@ class TranscriberWorker(QObject):
             self._log(f"음성 추출 시작: {os.path.basename(self.video_path)}")
             tmp_wav = os.path.join(
                 tempfile.gettempdir(),
-                f"vt_{os.path.basename(self.video_path)}.wav",
+                f"vt_{os.getpid()}_{os.path.basename(self.video_path)}.wav",
             )
             extract_audio(self.video_path, tmp_wav, ffmpeg)
             self._log("음성 추출 완료 (WAV 16kHz mono)")

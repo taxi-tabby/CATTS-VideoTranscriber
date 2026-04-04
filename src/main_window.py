@@ -1144,6 +1144,26 @@ class CorrectionDictDialog(QDialog):
         if not ok or not name.strip():
             return
 
+        # 모델/언어 선택
+        from src.config import get_whisper_model
+        models = ["tiny", "base", "small", "medium", "large-v3"]
+        current_model = get_whisper_model()
+        model_idx = models.index(current_model) if current_model in models else 3
+        model_name, ok = QInputDialog.getItem(
+            self, "분석 설정", "Whisper 모델:", models, model_idx, False,
+        )
+        if not ok:
+            return
+
+        languages = ["ko", "en", "ja", "zh", "auto"]
+        lang_labels = ["한국어", "English", "日本語", "中文", "자동 감지"]
+        lang, ok = QInputDialog.getItem(
+            self, "분석 설정", "언어:", lang_labels, 0, False,
+        )
+        if not ok:
+            return
+        language = languages[lang_labels.index(lang)]
+
         from src.database import compute_file_checksum
         checksum = compute_file_checksum(filepath)
 
@@ -1173,8 +1193,8 @@ class CorrectionDictDialog(QDialog):
 
         params = {
             "wav_path": tmp_wav,
-            "model_name": "medium",
-            "language": "ko",
+            "model_name": model_name,
+            "language": language,
             "use_diar": False,
             "profile": "interview",
         }
@@ -1529,7 +1549,7 @@ class MainWindow(QMainWindow):
     def _setup_shortcuts(self):
         QShortcut(QKeySequence("Ctrl+O"), self, self._on_add_video)
         QShortcut(QKeySequence("Ctrl+S"), self, self._on_export)
-        QShortcut(QKeySequence("Ctrl+C"), self, self._on_copy)
+        QShortcut(QKeySequence("Ctrl+Shift+C"), self, self._on_copy)
         QShortcut(QKeySequence("Delete"), self, self._on_delete)
         QShortcut(QKeySequence("Ctrl+F"), self, self._focus_timeline_search)
 
@@ -1904,9 +1924,10 @@ class MainWindow(QMainWindow):
             if item:
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
 
-        # 전체 텍스트도 편집 가능하게
-        self.txt_fulltext.setReadOnly(False)
-        self.txt_fulltext.setStyleSheet("QPlainTextEdit { border: 2px solid #4CAF50; }")
+        # 전체 텍스트는 편집 비활성화 (타임라인 편집만 지원, 저장 시 자동 재생성)
+        self.txt_fulltext.setReadOnly(True)
+        self.txt_fulltext.setStyleSheet("QPlainTextEdit { border: 2px solid #888; opacity: 0.7; }")
+        self.txt_fulltext.setPlaceholderText("타임라인에서 텍스트를 편집하면 전체 텍스트가 자동으로 갱신됩니다.")
 
     def _on_save_edit(self):
         if self._current_tid is None:
@@ -2032,7 +2053,6 @@ class MainWindow(QMainWindow):
             if idx >= 0:
                 self.tree_widget.takeTopLevelItem(idx)
             self._live_item = None
-            self.tree_widget.setEnabled(True)
             self._glow.stop()
 
     # ── 컨텍스트 메뉴 ──
@@ -2142,6 +2162,23 @@ class MainWindow(QMainWindow):
         if current is None:
             self._show_detail(False)
             return
+
+        # 편집 중이면 저장 여부 확인
+        if self._editing:
+            reply = QMessageBox.question(
+                self, "편집 중",
+                "저장하지 않은 편집 내용이 있습니다. 저장하시겠습니까?",
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+            )
+            if reply == QMessageBox.StandardButton.Save:
+                self._on_save_edit()
+            elif reply == QMessageBox.StandardButton.Cancel:
+                self.tree_widget.blockSignals(True)
+                self.tree_widget.setCurrentItem(_previous)
+                self.tree_widget.blockSignals(False)
+                return
+            else:
+                self._cancel_edit_mode()
 
         # "변환 중" 항목 선택 → 라이브 데이터 복원
         if current is self._live_item:
@@ -2295,7 +2332,6 @@ class MainWindow(QMainWindow):
         self._live_item.setData(0, Qt.ItemDataRole.UserRole + 1, "live")
         self.tree_widget.insertTopLevelItem(0, self._live_item)
         self.tree_widget.setCurrentItem(self._live_item)
-        self.tree_widget.setEnabled(False)
         self._glow.setGeometry(self.centralWidget().rect())
         self._glow.start()
 
