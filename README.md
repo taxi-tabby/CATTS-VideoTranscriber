@@ -1,120 +1,159 @@
-# CATTS - Video Transcriber
+<p align="center">
+  <img src="assets/icon/icon-ui-256.png" alt="CATTS" width="128">
+</p>
 
-Free, open-source media transcription tool powered by [OpenAI Whisper](https://github.com/openai/whisper) and [pyannote.audio](https://github.com/pyannote/pyannote-audio). Runs entirely half-offline on your local machine.
+<h1 align="center">CATTS - Video Transcriber</h1>
 
-> Korean UI only. English UI is planned for a future release.
->
-> [한국어 문서 (Korean)](docs/README_ko.md)
+<p align="center">
+  <strong>Free, open-source media transcription powered by AI</strong>
+</p>
 
----
+<p align="center">
+  <a href="https://github.com/taxi-tabby/CATTS-VideoTranscriber/actions/workflows/test.yml"><img src="https://github.com/taxi-tabby/CATTS-VideoTranscriber/actions/workflows/test.yml/badge.svg" alt="Tests"></a>
+  <a href="https://github.com/taxi-tabby/CATTS-VideoTranscriber/actions/workflows/build.yml"><img src="https://github.com/taxi-tabby/CATTS-VideoTranscriber/actions/workflows/build.yml/badge.svg" alt="Build"></a>
+  <img src="https://img.shields.io/badge/coverage-71%25-brightgreen" alt="Coverage 71%">
+  <img src="https://img.shields.io/badge/python-3.11+-blue" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
+</p>
 
-## Downloads
+<p align="center">
+  <img src="https://img.shields.io/badge/Windows-0078D6?logo=windows&logoColor=white" alt="Windows">
+  <img src="https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white" alt="macOS">
+  <img src="https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black" alt="Linux">
+</p>
 
-[Github CATTS-VideoTranscriber/releases](https://github.com/taxi-tabby/CATTS-VideoTranscriber/releases)
+<p align="center">
+  <a href="https://github.com/taxi-tabby/CATTS-VideoTranscriber/releases">Downloads</a> &bull;
+  <a href="docs/README_ko.md">한국어 문서</a>
+</p>
 
 ---
 
 ## Features
 
-- **Speech-to-Text** -- Transcribe video and audio files using OpenAI Whisper (tiny through large-v3)
-- **Speaker Diarization** -- Identify and label individual speakers via pyannote.audio
-- **Audio Preprocessing** -- High-pass filter, noise reduction (spectral gating), Silero VAD non-speech suppression, silence trimming, and peak normalization for improved accuracy
-- **Timestamped Segments** -- Browse transcription results with per-segment timestamps
-- **Drag & Drop** -- Drop media files directly into the application window
-- **Export** -- Save transcriptions for external use
-- **Transcript History** -- All transcriptions are stored in a local SQLite database with search and folder organization
-- **GPU Acceleration** -- CUDA support for faster transcription and diarization when available
-- **Windows Installer** -- Ships as a standalone `.exe` with an Inno Setup installer
+| Feature | Description |
+|---------|-------------|
+| **Speech-to-Text** | Transcribe video/audio using OpenAI Whisper (tiny ~ large-v3) |
+| **Speaker Diarization** | Identify speakers via custom VAD + pyannote embeddings + silhouette clustering |
+| **Vocal Separation** | Demucs-powered background music/SFX removal for noisy content |
+| **Analysis Profiles** | Interview (clean speech) vs Movie/Music (Demucs preprocessing) |
+| **Correction Dictionary** | Media-specific word correction with timestamp-aware prompt injection |
+| **Hallucination Filter** | Auto-remove Whisper repetitions, language mismatches, no-speech segments |
+| **VAD-based Chunking** | Split at silence boundaries, not fixed 30s — prevents mid-word cuts |
+| **Real-time Preview** | Watch segments appear as transcription progresses |
+| **Crash Recovery** | Resume interrupted transcriptions from where they stopped |
+| **Memory Safe** | ML inference runs in subprocess — OS reclaims all memory on completion |
+| **Export** | SRT subtitles, plain text |
+| **GPU Acceleration** | CUDA support for faster processing |
 
 ## Supported Formats
 
-**Video** -- mp4, avi, mkv, mov, wmv, flv, webm
+**Video** — mp4, avi, mkv, mov, wmv, flv, webm
 
-**Audio** -- mp3, wav, flac, aac, ogg, wma, m4a
+**Audio** — mp3, wav, flac, aac, ogg, wma, m4a
 
-## Requirements
+## Platform Support
 
-- Windows 10/11
-- Python 3.11+
-- NVIDIA GPU with CUDA support (optional, for acceleration)
-- [HuggingFace token](https://huggingface.co/settings/tokens) (required only for speaker diarization)
+| Platform | Package | Notes |
+|----------|---------|-------|
+| **Windows** | Portable ZIP, Installer (Inno Setup) | CUDA optional |
+| **macOS** | DMG (ad-hoc signed, drag & drop install) | Apple Silicon + Intel |
+| **Linux** | tar.gz, .deb, .rpm, AppImage | CPU or CUDA |
 
-## Installation
+## Quick Start
 
-### From source
+### Download
+
+Get the latest release: [**Releases**](https://github.com/taxi-tabby/CATTS-VideoTranscriber/releases)
+
+### From Source
 
 ```bash
-git clone https://github.com/<your-username>/video-transcriber.git
-cd video-transcriber
-python -m venv .venv
-.venv\Scripts\activate
+git clone https://github.com/taxi-tabby/CATTS-VideoTranscriber.git
+cd CATTS-VideoTranscriber
+
+python -m venv venv
+# Windows
+venv\Scripts\activate
+# macOS/Linux
+source venv/bin/activate
+
+pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
-```
 
-### Run
-
-```bash
 python -m src.main
 ```
 
-### Build standalone executable
+## Processing Pipeline
 
-```bash
-build.bat
+```
+Media File
+  │
+  ├─ FFmpeg → Audio Extraction (16kHz mono)
+  │
+  ├─ [noisy profile] Demucs → Vocal Separation
+  │
+  ├─ High-pass Filter → Noise Reduction → Silero VAD → Trim → Normalize
+  │
+  ├─ [optional] Speaker Diarization (VAD + pyannote embeddings + clustering)
+  │
+  ├─ VAD-based Chunking (split at silence, not fixed 30s)
+  │
+  ├─ Whisper Transcription (with correction dictionary prompt hints)
+  │
+  ├─ Hallucination Filter (repetition, language mismatch, no_speech)
+  │
+  └─ Correction Dictionary Post-processing (text replacement)
 ```
 
-This produces:
-- Portable exe: `build\output\dist\VideoTranscriber\VideoTranscriber.exe`
-- Installer: `build\output\installer\CATTS_Setup_1.0.0.exe` (requires [Inno Setup 6](https://jrsoftware.org/isdl.php))
+## Tech Stack
+
+| Component | Library |
+|-----------|---------|
+| GUI | PySide6 (Qt 6) |
+| Transcription | OpenAI Whisper |
+| Speaker Diarization | pyannote.audio (embeddings), scikit-learn (clustering) |
+| Vocal Separation | Demucs (Meta) |
+| VAD | Silero VAD |
+| Audio Processing | scipy, noisereduce |
+| Database | SQLite |
+| Packaging | PyInstaller |
 
 ## Architecture
 
 ```
 src/
-  main.py             -- Application entry point
-  main_window.py      -- PySide6 GUI
-  transcriber.py       -- Audio extraction and Whisper transcription pipeline
-  audio_preprocess.py  -- Audio preprocessing (filter, denoise, VAD, normalize)
-  diarizer.py          -- Speaker diarization via pyannote.audio
-  config.py            -- User configuration (~/.video-transcriber/config.json)
-  database.py          -- SQLite persistence layer
-  model_utils.py       -- Whisper model cache management
+  main.py               Entry point, theming, selftest
+  main_window.py         PySide6 GUI (main window, dialogs, menus)
+  transcriber.py         Subprocess-based transcription pipeline
+  audio_preprocess.py    Audio preprocessing + Demucs vocal separation
+  diarizer.py            Speaker diarization (VAD + embeddings + clustering)
+  hallucination_filter.py  Whisper hallucination detection and removal
+  dict_analyzer.py       Correction dictionary media analysis engine
+  database.py            SQLite persistence + correction dictionary storage
+  config.py              User configuration
+  model_utils.py         Whisper model cache management
+  crash_reporter.py      Error reporting with system info collection
 ```
 
-## Audio Preprocessing Pipeline
+## Testing
 
-All audio is preprocessed before transcription to improve recognition accuracy:
+```bash
+python -m pytest tests/ --cov=src --cov-fail-under=60 -v
+```
 
-1. **High-pass filter** (80 Hz) -- Removes low-frequency rumble and hum noise
-2. **Noise reduction** -- Spectral gating via noisereduce to suppress background noise
-3. **Silero VAD** -- Zeroes out non-speech regions to prevent Whisper hallucinations
-4. **Silence trimming** -- Strips leading and trailing silence (with timestamp offset correction)
-5. **Peak normalization** -- Normalizes volume to a consistent level
-
-## Tech Stack
-
-| Component | Library |
-|---|---|
-| GUI | PySide6 (Qt 6) |
-| Transcription | openai-whisper |
-| Speaker Diarization | pyannote.audio |
-| Audio Extraction | FFmpeg (via imageio-ffmpeg) |
-| Preprocessing | scipy, noisereduce, Silero VAD |
-| Database | SQLite |
-| Packaging | PyInstaller, Inno Setup |
+170 tests, 71% coverage. CI runs on every PR via GitHub Actions.
 
 ## Contributing
 
-Contributions are welcome. Most PRs will be accepted as long as they follow the guidelines. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-This project is actively developed with [Claude Code](https://claude.ai/claude-code), and using it for contributions is strongly recommended. Claude Code understands the full codebase context and helps you write code that is consistent with existing patterns.
-
-All submissions are reviewed for security concerns. PRs that introduce vulnerabilities will be rejected without exception.
-
-## Built with Claude
-
-This project is designed, implemented, and maintained with heavy use of [Claude](https://claude.ai) by Anthropic. Architecture decisions, feature implementation, code review, debugging, and documentation are all done in collaboration with Claude Code.
+This project is developed with [Claude Code](https://claude.ai/claude-code). Using it for contributions is recommended.
 
 ## License
 
 MIT
+
+## Built with Claude
+
+Designed, implemented, and maintained with [Claude](https://claude.ai) by Anthropic.
