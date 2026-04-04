@@ -202,11 +202,18 @@ def _subprocess_worker(params: dict, msg_queue: mp.Queue, cancel_event: mp.Event
 
         # 교정 사전 로드
         correction_entries = params.get("correction_entries") or []
-        if correction_entries:
-            # prompt 힌트: 올바른 단어들을 쉼표로 연결 (중복 제거, 400자 제한)
+        correction_has_timestamps = any(
+            e.get("start_time") is not None for e in correction_entries
+        )
+        if correction_entries and not correction_has_timestamps:
+            # 타임스탬프 없는 사전: 전체 교정 힌트 (기존 방식)
             correct_words = list(dict.fromkeys(e["correct"] for e in correction_entries))
             correction_hint = ", ".join(correct_words)[:400]
-            _log(f"교정 사전 적용: {len(correction_entries)}개 항목 ({correction_hint[:80]}...)")
+            _log(f"교정 사전 적용: {len(correction_entries)}개 항목 (전체 적용)")
+        elif correction_entries and correction_has_timestamps:
+            correction_hint = ""  # 청크별로 동적 생성
+            corrected_count = sum(1 for e in correction_entries if e.get("is_corrected"))
+            _log(f"교정 사전 적용: {corrected_count}개 교정 항목 (시간 기반)")
         else:
             correction_hint = ""
 
@@ -257,7 +264,19 @@ def _subprocess_worker(params: dict, msg_queue: mp.Queue, cancel_event: mp.Event
 
             # prompt 구성: 교정 힌트 + 이전 청크 텍스트 (224토큰 이내)
             prompt_parts = []
-            if correction_hint:
+            if correction_has_timestamps:
+                # 시간 기반: 이 청크 시간대에 해당하는 교정만 선택
+                chunk_start_sec = chunk_start / SAMPLE_RATE
+                chunk_end_sec = chunk_end / SAMPLE_RATE
+                chunk_corrections = [
+                    e for e in correction_entries
+                    if e.get("is_corrected") and e.get("start_time") is not None
+                    and e["start_time"] < chunk_end_sec and e["end_time"] > chunk_start_sec
+                ]
+                if chunk_corrections:
+                    words = list(dict.fromkeys(e["correct"] for e in chunk_corrections))
+                    prompt_parts.append(", ".join(words)[:400])
+            elif correction_hint:
                 prompt_parts.append(correction_hint)
             if prev_text:
                 ctx = _SPECIAL_TOKEN_RE.sub("", prev_text[-200:]).strip()
