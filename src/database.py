@@ -36,6 +36,7 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             wrong   TEXT NOT NULL,
             correct TEXT NOT NULL
         )""",
+        "CREATE INDEX IF NOT EXISTS idx_correction_entries_dict_id ON correction_entries(dict_id)",
     ]),
 ]
 
@@ -399,6 +400,15 @@ class Database:
 
     def delete_correction_entry(self, entry_id: int) -> None:
         self._conn.execute("DELETE FROM correction_entries WHERE id = ?", (entry_id,))
+        self._conn.commit()
+
+    def replace_correction_entries(self, dict_id: int, entries: list[dict]) -> None:
+        """사전의 모든 항목을 원자적으로 교체한다 (트랜잭션)."""
+        self._conn.execute("DELETE FROM correction_entries WHERE dict_id = ?", (dict_id,))
+        self._conn.executemany(
+            "INSERT INTO correction_entries (dict_id, wrong, correct) VALUES (?, ?, ?)",
+            [(dict_id, e["wrong"], e["correct"]) for e in entries if e.get("wrong") and e.get("correct")],
+        )
         self._conn.commit()
 
     def close(self):

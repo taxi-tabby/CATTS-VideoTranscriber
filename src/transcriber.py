@@ -203,9 +203,9 @@ def _subprocess_worker(params: dict, msg_queue: mp.Queue, cancel_event: mp.Event
         # 교정 사전 로드
         correction_entries = params.get("correction_entries") or []
         if correction_entries:
-            # prompt 힌트: 올바른 단어들을 쉼표로 연결 (중복 제거)
+            # prompt 힌트: 올바른 단어들을 쉼표로 연결 (중복 제거, 400자 제한)
             correct_words = list(dict.fromkeys(e["correct"] for e in correction_entries))
-            correction_hint = ", ".join(correct_words)
+            correction_hint = ", ".join(correct_words)[:400]
             _log(f"교정 사전 적용: {len(correction_entries)}개 항목 ({correction_hint[:80]}...)")
         else:
             correction_hint = ""
@@ -301,6 +301,11 @@ def _subprocess_worker(params: dict, msg_queue: mp.Queue, cancel_event: mp.Event
                 all_segments[chunk_seg_start:] = matched
 
             for seg in all_segments[chunk_seg_start:]:
+                # 실시간 스트림에도 교정 사전 적용
+                if correction_entries:
+                    for entry in correction_entries:
+                        if entry["wrong"] in seg["text"]:
+                            seg["text"] = seg["text"].replace(entry["wrong"], entry["correct"])
                 msg_queue.put(("segment", seg))
 
         # 환각 필터 적용 (반복, 언어 불일치, no_speech 등)

@@ -1107,13 +1107,13 @@ class CorrectionDictDialog(QDialog):
         dict_id = self._current_dict_id()
         if dict_id is None:
             return
-        for e in self.db.get_correction_entries(dict_id):
-            self.db.delete_correction_entry(e["id"])
+        entries = []
         for row in range(self.table_entries.rowCount()):
             wrong = (self.table_entries.item(row, 0).text() or "").strip()
             correct = (self.table_entries.item(row, 1).text() or "").strip()
             if wrong and correct:
-                self.db.add_correction_entry(dict_id, wrong, correct)
+                entries.append({"wrong": wrong, "correct": correct})
+        self.db.replace_correction_entries(dict_id, entries)
         self._on_dict_selected(self.list_dicts.currentRow())
 
 
