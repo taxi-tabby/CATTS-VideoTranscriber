@@ -99,3 +99,59 @@ class TestDatabase:
         assert result["segments"][0]["speaker"] == "김대리"
         assert result["segments"][1]["speaker"] == "화자 2"
         assert result["segments"][2]["speaker"] == "김대리"
+
+
+class TestCorrectionDict:
+    def test_create_and_list(self, db):
+        dict_id = db.create_correction_dict("my dict")
+        dicts = db.list_correction_dicts()
+        assert len(dicts) == 1
+        assert dicts[0]["id"] == dict_id
+        assert dicts[0]["name"] == "my dict"
+        assert dicts[0]["entry_count"] == 0
+
+    def test_add_and_get_entries(self, db):
+        dict_id = db.create_correction_dict("dict1")
+        eid1 = db.add_correction_entry(dict_id, "teh", "the")
+        eid2 = db.add_correction_entry(dict_id, "wrold", "world")
+        entries = db.get_correction_entries(dict_id)
+        assert len(entries) == 2
+        assert {e["wrong"] for e in entries} == {"teh", "wrold"}
+        assert {e["correct"] for e in entries} == {"the", "world"}
+
+    def test_delete_entry(self, db):
+        dict_id = db.create_correction_dict("dict1")
+        eid1 = db.add_correction_entry(dict_id, "aaa", "AAA")
+        eid2 = db.add_correction_entry(dict_id, "bbb", "BBB")
+        db.delete_correction_entry(eid1)
+        entries = db.get_correction_entries(dict_id)
+        assert len(entries) == 1
+        assert entries[0]["wrong"] == "bbb"
+
+    def test_delete_dict_cascades(self, db):
+        dict_id = db.create_correction_dict("dict1")
+        db.add_correction_entry(dict_id, "x", "y")
+        db.add_correction_entry(dict_id, "a", "b")
+        db.delete_correction_dict(dict_id)
+        dicts = db.list_correction_dicts()
+        assert len(dicts) == 0
+        entries = db.get_correction_entries(dict_id)
+        assert len(entries) == 0
+
+    def test_rename_dict(self, db):
+        dict_id = db.create_correction_dict("old name")
+        db.rename_correction_dict(dict_id, "new name")
+        dicts = db.list_correction_dicts()
+        assert dicts[0]["name"] == "new name"
+
+    def test_list_with_entry_count(self, db):
+        d1 = db.create_correction_dict("alpha")
+        d2 = db.create_correction_dict("beta")
+        db.add_correction_entry(d1, "a", "A")
+        db.add_correction_entry(d1, "b", "B")
+        db.add_correction_entry(d1, "c", "C")
+        db.add_correction_entry(d2, "x", "X")
+        dicts = db.list_correction_dicts()
+        counts = {d["name"]: d["entry_count"] for d in dicts}
+        assert counts["alpha"] == 3
+        assert counts["beta"] == 1
