@@ -308,3 +308,63 @@ def split_long_segments(
                 result.append({"start": t, "end": end})
                 t = end
     return result
+
+
+# ---------------------------------------------------------------------------
+# VAD 기반 청크 분할 (Whisper 30초 제한 대응)
+# ---------------------------------------------------------------------------
+
+def build_vad_chunks(
+    speech_segments: list[dict],
+    total_samples: int,
+    max_chunk_sec: float = 30.0,
+    pad_sec: float = 0.1,
+) -> list[dict]:
+    """VAD 음성 구간을 기반으로 무음 지점에서 청크를 분할한다.
+
+    발화 중간을 자르지 않고, 인접 음성 구간을 병합하되
+    max_chunk_sec를 넘지 않도록 무음 지점에서만 분할한다.
+
+    Args:
+        speech_segments: [{"start": float(초), "end": float(초)}, ...]
+            get_speech_segments()의 반환값.
+        total_samples: 전체 오디오 샘플 수
+        max_chunk_sec: 청크 최대 길이 (초). Whisper의 30초 제한.
+        pad_sec: 청크 양쪽에 추가할 패딩 (초). 자연스러운 전환용.
+
+    Returns:
+        [{"start_sample": int, "end_sample": int}, ...]
+        무음만 있는 구간은 제외된다.
+    """
+    if not speech_segments:
+        return []
+
+    chunks: list[dict] = []
+    chunk_start = speech_segments[0]["start"]
+    chunk_end = speech_segments[0]["end"]
+
+    for seg in speech_segments[1:]:
+        # 현재 청크에 이 세그먼트를 추가했을 때의 길이
+        potential_end = seg["end"]
+        if potential_end - chunk_start <= max_chunk_sec:
+            # 병합
+            chunk_end = potential_end
+        else:
+            # 현재 청크 확정, 새 청크 시작
+            chunks.append({"start": chunk_start, "end": chunk_end})
+            chunk_start = seg["start"]
+            chunk_end = seg["end"]
+
+    # 마지막 청크 확정
+    chunks.append({"start": chunk_start, "end": chunk_end})
+
+    # 샘플 단위로 변환 + 패딩 + 클램프
+    result = []
+    for c in chunks:
+        start_sample = int((c["start"] - pad_sec) * SAMPLE_RATE)
+        end_sample = int((c["end"] + pad_sec) * SAMPLE_RATE)
+        start_sample = max(0, start_sample)
+        end_sample = min(total_samples, end_sample)
+        result.append({"start_sample": start_sample, "end_sample": end_sample})
+
+    return result

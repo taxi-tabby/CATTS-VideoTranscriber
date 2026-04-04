@@ -204,3 +204,68 @@ class TestSplitLongSegments:
     def test_empty_input(self):
         from src.audio_preprocess import split_long_segments
         assert split_long_segments([]) == []
+
+
+class TestBuildVadChunks:
+    def test_basic_chunking(self):
+        """음성 구간을 청크로 변환해야 한다."""
+        from src.audio_preprocess import build_vad_chunks, SAMPLE_RATE
+        segments = [
+            {"start": 1.0, "end": 3.0},
+            {"start": 5.0, "end": 8.0},
+            {"start": 10.0, "end": 12.0},
+        ]
+        chunks = build_vad_chunks(segments, total_samples=20 * SAMPLE_RATE)
+        assert len(chunks) >= 1
+        assert all("start_sample" in c and "end_sample" in c for c in chunks)
+
+    def test_respects_max_chunk_sec(self):
+        """max_chunk_sec를 초과하지 않아야 한다 (단일 구간 제외)."""
+        from src.audio_preprocess import build_vad_chunks, SAMPLE_RATE
+        segments = [
+            {"start": 0.0, "end": 5.0},
+            {"start": 6.0, "end": 11.0},
+            {"start": 12.0, "end": 17.0},
+            {"start": 18.0, "end": 23.0},
+            {"start": 24.0, "end": 29.0},
+            {"start": 30.0, "end": 35.0},
+        ]
+        chunks = build_vad_chunks(segments, total_samples=40 * SAMPLE_RATE, max_chunk_sec=15.0)
+        for c in chunks:
+            duration = (c["end_sample"] - c["start_sample"]) / SAMPLE_RATE
+            # 패딩 포함해도 max + 2*pad 이하
+            assert duration <= 15.0 + 1.0
+
+    def test_empty_segments(self):
+        """음성 구간이 없으면 빈 리스트를 반환해야 한다."""
+        from src.audio_preprocess import build_vad_chunks
+        assert build_vad_chunks([], total_samples=16000) == []
+
+    def test_single_long_segment(self):
+        """max_chunk_sec보다 긴 단일 구간은 그대로 유지해야 한다."""
+        from src.audio_preprocess import build_vad_chunks, SAMPLE_RATE
+        segments = [{"start": 0.0, "end": 45.0}]
+        chunks = build_vad_chunks(segments, total_samples=50 * SAMPLE_RATE, max_chunk_sec=30.0)
+        assert len(chunks) == 1
+
+    def test_clamps_to_total_samples(self):
+        """start_sample >= 0, end_sample <= total_samples 이어야 한다."""
+        from src.audio_preprocess import build_vad_chunks, SAMPLE_RATE
+        segments = [{"start": 0.0, "end": 5.0}]
+        total = 5 * SAMPLE_RATE
+        chunks = build_vad_chunks(segments, total_samples=total)
+        for c in chunks:
+            assert c["start_sample"] >= 0
+            assert c["end_sample"] <= total
+
+    def test_no_overlap_between_chunks(self):
+        """청크끼리 겹치지 않아야 한다."""
+        from src.audio_preprocess import build_vad_chunks, SAMPLE_RATE
+        segments = [
+            {"start": 0.0, "end": 10.0},
+            {"start": 15.0, "end": 25.0},
+            {"start": 30.0, "end": 40.0},
+        ]
+        chunks = build_vad_chunks(segments, total_samples=45 * SAMPLE_RATE, max_chunk_sec=12.0, pad_sec=0.0)
+        for i in range(len(chunks) - 1):
+            assert chunks[i]["end_sample"] <= chunks[i + 1]["start_sample"]
