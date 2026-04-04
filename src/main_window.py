@@ -490,6 +490,64 @@ class SettingsDialog(QDialog):
         diar_layout.addStretch()
         tabs.addTab(diar_tab, "화자 분리")
 
+        # ── 라이선스 탭 ──
+        license_tab = QWidget()
+        lic_layout = QVBoxLayout(license_tab)
+
+        lic_table = QTableWidget()
+        lic_table.setColumnCount(4)
+        lic_table.setHorizontalHeaderLabels(["라이브러리", "용도", "라이선스", "버전"])
+        lic_table.horizontalHeader().setStretchLastSection(True)
+        lic_table.horizontalHeader().setSectionResizeMode(0, lic_table.horizontalHeader().ResizeMode.ResizeToContents)
+        lic_table.horizontalHeader().setSectionResizeMode(1, lic_table.horizontalHeader().ResizeMode.Stretch)
+        lic_table.horizontalHeader().setSectionResizeMode(2, lic_table.horizontalHeader().ResizeMode.ResizeToContents)
+        lic_table.horizontalHeader().setSectionResizeMode(3, lic_table.horizontalHeader().ResizeMode.ResizeToContents)
+        lic_table.setEditTriggers(lic_table.EditTrigger.NoEditTriggers)
+        lic_table.setSelectionBehavior(lic_table.SelectionBehavior.SelectRows)
+        lic_table.verticalHeader().setVisible(False)
+
+        _licenses = [
+            ("OpenAI Whisper", "음성 인식 (Speech-to-Text)", "MIT", "openai-whisper"),
+            ("PyTorch", "딥러닝 프레임워크", "BSD-3-Clause", "torch"),
+            ("torchaudio", "오디오 처리", "BSD-2-Clause", "torchaudio"),
+            ("pyannote.audio", "화자 임베딩 추출", "MIT", "pyannote.audio"),
+            ("Demucs", "보컬/배경음 분리", "MIT", "demucs"),
+            ("SpeechBrain", "음성 처리 툴킷", "Apache-2.0", "speechbrain"),
+            ("Silero VAD", "음성 구간 검출 (VAD)", "MIT", "—"),
+            ("PySide6 (Qt)", "GUI 프레임워크", "LGPL-3.0", "PySide6"),
+            ("NumPy", "수치 연산", "BSD-3-Clause", "numpy"),
+            ("SciPy", "과학 연산", "BSD-3-Clause", "scipy"),
+            ("scikit-learn", "클러스터링 (화자 분리)", "BSD-3-Clause", "scikit-learn"),
+            ("noisereduce", "배경 소음 제거", "MIT", "noisereduce"),
+            ("SoundFile", "오디오 파일 읽기/쓰기", "BSD-3-Clause", "soundfile"),
+            ("imageio-ffmpeg", "FFmpeg 영상 처리", "BSD-2-Clause", "imageio-ffmpeg"),
+            ("julius", "오디오 DSP 필터", "MIT", "julius"),
+            ("OpenUnmix", "음원 분리 모델", "MIT", "openunmix"),
+            ("HuggingFace Hub", "모델 다운로드", "Apache-2.0", "huggingface-hub"),
+        ]
+
+        lic_table.setRowCount(len(_licenses))
+        for row, (name, purpose, lic, pkg) in enumerate(_licenses):
+            ver = "—"
+            if pkg != "—":
+                try:
+                    import importlib.metadata
+                    ver = importlib.metadata.version(pkg)
+                except Exception:
+                    ver = "—"
+            lic_table.setItem(row, 0, QTableWidgetItem(name))
+            lic_table.setItem(row, 1, QTableWidgetItem(purpose))
+            lic_table.setItem(row, 2, QTableWidgetItem(lic))
+            lic_table.setItem(row, 3, QTableWidgetItem(ver))
+
+        lic_layout.addWidget(lic_table)
+
+        lic_note = QLabel("이 프로그램은 위 오픈소스 라이브러리를 사용하여 제작되었습니다.")
+        lic_note.setStyleSheet("color: gray; font-size: 11px;")
+        lic_layout.addWidget(lic_note)
+
+        tabs.addTab(license_tab, "라이선스")
+
         tabs.setCurrentIndex(initial_tab)
         layout.addWidget(tabs)
 
