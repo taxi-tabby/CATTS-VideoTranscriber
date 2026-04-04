@@ -36,6 +36,27 @@ jobs:
           python -m pytest tests/ \
             --cov=src \
             --cov-report=term-missing \
+            --cov-report=json:coverage.json \
             --cov-fail-under=60 \
             --ignore=tests/test_torch_load_patch.py \
             -v
+
+      - name: Update coverage badge
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          COV=$(python -c "import json; print(int(json.load(open('coverage.json'))['totals']['percent_covered_display']))")
+          if [ "$COV" -ge 80 ]; then COLOR="brightgreen"
+          elif [ "$COV" -ge 60 ]; then COLOR="green"
+          elif [ "$COV" -ge 40 ]; then COLOR="yellow"
+          else COLOR="red"; fi
+          echo "{\"schemaVersion\":1,\"label\":\"coverage\",\"message\":\"${COV}%\",\"color\":\"${COLOR}\"}" > coverage-badge.json
+          echo "Coverage: ${COV}% (${COLOR})"
+
+      - name: Upload coverage badge to gist
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: exuanbo/actions-deploy-gist@v1
+        with:
+          token: ${{ secrets.GIST_TOKEN }}
+          gist_id: ${{ vars.COVERAGE_GIST_ID }}
+          file_path: coverage-badge.json
+          file_type: text

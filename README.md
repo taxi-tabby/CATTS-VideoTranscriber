@@ -11,7 +11,7 @@
 <p align="center">
   <a href="https://github.com/taxi-tabby/CATTS-VideoTranscriber/actions/workflows/test.yml"><img src="https://github.com/taxi-tabby/CATTS-VideoTranscriber/actions/workflows/test.yml/badge.svg" alt="Tests"></a>
   <a href="https://github.com/taxi-tabby/CATTS-VideoTranscriber/actions/workflows/build.yml"><img src="https://github.com/taxi-tabby/CATTS-VideoTranscriber/actions/workflows/build.yml/badge.svg" alt="Build"></a>
-  <img src="https://img.shields.io/badge/coverage-71%25-brightgreen" alt="Coverage 71%">
+  <img src="https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/taxi-tabby/COVERAGE_GIST_ID/raw/coverage-badge.json" alt="Coverage">
   <img src="https://img.shields.io/badge/python-3.11+-blue" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
 </p>
