@@ -510,6 +510,13 @@ jobs:
             exit 1
           fi
 
+      - name: Ad-hoc code sign
+        run: |
+          # ad-hoc 서명: Apple Developer 계정 없이도 가능
+          # "손상된 앱" → "확인되지 않은 개발자"로 변경 (우클릭 → 열기로 실행 가능)
+          codesign --force --deep --sign - build/output/dist/CATTS.app
+          echo "Ad-hoc signed CATTS.app"
+
       - name: Create DMG installer
         run: |
           VERSION="${{ needs.version.outputs.tag }}"
@@ -519,6 +526,22 @@ jobs:
           mkdir -p dmg_content
           cp -R build/output/dist/CATTS.app dmg_content/
           ln -s /Applications dmg_content/Applications
+
+          # 설치 안내 파일
+          cat > dmg_content/설치방법.txt << 'GUIDE'
+          CATTS 설치 방법
+          ===============
+
+          1. CATTS.app을 Applications 폴더로 드래그하세요.
+
+          2. 처음 실행 시 "확인되지 않은 개발자" 경고가 나타나면:
+             - CATTS.app을 우클릭(또는 Control+클릭) → "열기" 선택
+             - "열기" 버튼 클릭
+
+          3. 또는 터미널에서 아래 명령어를 실행하세요:
+             xattr -cr /Applications/CATTS.app
+          GUIDE
+          sed -i '' 's/^          //' dmg_content/설치방법.txt
 
           # DMG 생성
           hdiutil create -volname "CATTS ${VERSION}" \
