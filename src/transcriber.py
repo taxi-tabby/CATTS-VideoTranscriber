@@ -175,7 +175,7 @@ class TranscriberWorker(QObject):
         whisper_workers: int = 1,
         diar_threads: int = 1,
         skip_seconds: float = 0.0,
-        diar_profile: str = "interview",
+        profile: str = "interview",
     ):
         super().__init__()
         self.video_path = video_path
@@ -189,7 +189,7 @@ class TranscriberWorker(QObject):
         self.whisper_workers = whisper_workers
         self.diar_threads = diar_threads
         self.skip_seconds = skip_seconds
-        self.diar_profile = diar_profile
+        self.profile = profile
         self._cancelled = False
 
     def cancel(self):
@@ -236,7 +236,7 @@ class TranscriberWorker(QObject):
                 return
 
             from src.audio_preprocess import preprocess as preprocess_audio
-            use_vocal_sep = self.diar_profile == "noisy"
+            use_vocal_sep = self.profile == "noisy"
             if use_vocal_sep:
                 self._log("오디오 전처리 중 (보컬 분리, 노이즈 제거, 트리밍)...")
             else:
@@ -285,7 +285,7 @@ class TranscriberWorker(QObject):
                     cancel_check=lambda: self._cancelled,
                     log_callback=self._log,
                     num_threads=self.diar_threads,
-                    profile_name=self.diar_profile,
+                    profile_name=self.profile,
                 )
                 # diarization 타임스탬프에 트리밍 오프셋 적용
                 # (전처리된 오디오 기준 → 원본 기준으로 보정)

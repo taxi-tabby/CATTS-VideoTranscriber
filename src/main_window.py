@@ -648,6 +648,20 @@ class TranscriptionSettingsDialog(QDialog):
         lang_layout.addStretch()
         layout.addWidget(grp_lang)
 
+        # ── 분석 프로파일 (전처리 + 화자분리 공통) ──
+        grp_profile = QGroupBox("분석 프로파일")
+        profile_layout = QHBoxLayout(grp_profile)
+        self.combo_profile = QComboBox()
+        self.combo_profile.addItem("인터뷰/대화 — 깨끗한 음성 위주", "interview")
+        self.combo_profile.addItem("영상/영화/노래 — 배경음악, 효과음 포함", "noisy")
+        self.combo_profile.setToolTip(
+            "인터뷰/대화: 일반 전처리\n"
+            "영상/영화/노래: Demucs 보컬 분리로 배경음 제거 후 처리"
+        )
+        profile_layout.addWidget(self.combo_profile)
+        layout.addWidget(grp_profile)
+
+        # ── 화자 분리 ──
         grp_diar = QGroupBox("화자 분리")
         diar_layout = QVBoxLayout(grp_diar)
 
@@ -658,19 +672,6 @@ class TranscriptionSettingsDialog(QDialog):
         self.speaker_widget = QWidget()
         speaker_layout = QVBoxLayout(self.speaker_widget)
         speaker_layout.setContentsMargins(20, 0, 0, 0)
-
-        profile_row = QHBoxLayout()
-        profile_row.addWidget(QLabel("분석 프로파일:"))
-        self.combo_diar_profile = QComboBox()
-        self.combo_diar_profile.addItem("인터뷰/대화", "interview")
-        self.combo_diar_profile.addItem("영상/영화/노래", "noisy")
-        self.combo_diar_profile.setToolTip(
-            "인터뷰/대화: 깨끗한 음성 위주\n"
-            "영상/영화/노래: 배경음악, 효과음이 포함된 콘텐츠"
-        )
-        profile_row.addWidget(self.combo_diar_profile)
-        profile_row.addStretch()
-        speaker_layout.addLayout(profile_row)
 
         mode_row = QHBoxLayout()
         mode_row.addWidget(QLabel("화자 수:"))
@@ -869,7 +870,7 @@ class TranscriptionSettingsDialog(QDialog):
         else:
             diar_threads = 1
 
-        diar_profile = self.combo_diar_profile.currentData() if use_diar else "interview"
+        profile = self.combo_profile.currentData()
 
         return {
             "model_name": model,
@@ -880,7 +881,7 @@ class TranscriptionSettingsDialog(QDialog):
             "max_speakers": max_speakers,
             "whisper_workers": whisper_workers,
             "diar_threads": diar_threads,
-            "diar_profile": diar_profile,
+            "profile": profile,
         }
 
 
@@ -1781,7 +1782,7 @@ class MainWindow(QMainWindow):
             whisper_workers=settings.get("whisper_workers", 1),
             diar_threads=settings.get("diar_threads", 1),
             skip_seconds=skip_seconds,
-            diar_profile=settings.get("diar_profile", "interview"),
+            profile=settings.get("profile", "interview"),
         )
         self._worker.moveToThread(self._thread)
 
