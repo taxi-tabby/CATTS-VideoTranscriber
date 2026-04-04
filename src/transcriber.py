@@ -343,16 +343,16 @@ def _force_release_ml_memory() -> None:
 
     # OS에 미사용 힙 메모리 반환 요청
     try:
+        import ctypes
         if sys.platform == "win32":
-            import ctypes
             ctypes.windll.kernel32.SetProcessWorkingSetSize(
                 ctypes.windll.kernel32.GetCurrentProcess(),
                 ctypes.c_size_t(-1), ctypes.c_size_t(-1),
             )
-        else:
-            import ctypes
+        elif sys.platform == "linux":
             libc = ctypes.CDLL("libc.so.6")
             libc.malloc_trim(0)
+        # macOS: malloc_trim 없음 — subprocess 방식이므로 불필요
     except Exception:
         pass
 CHUNK_SAMPLES = CHUNK_SECONDS * SAMPLE_RATE
@@ -387,8 +387,25 @@ def _get_available_memory_mb() -> int:
             stat.dwLength = ctypes.sizeof(stat)
             kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
             return int(stat.ullAvailPhys / (1024 * 1024))
+        elif sys.platform == "darwin":
+            # macOS: vm_stat 또는 sysctl
+            import subprocess as _sp
+            out = _sp.check_output(["sysctl", "-n", "hw.memsize"], text=True)
+            total = int(out.strip())
+            # vm_stat으로 free + inactive 페이지 계산
+            vm = _sp.check_output(["vm_stat"], text=True)
+            page_size = 16384  # Apple Silicon default
+            free_pages = 0
+            for line in vm.splitlines():
+                if "page size of" in line:
+                    page_size = int(line.split()[-2])
+                if "Pages free:" in line:
+                    free_pages += int(line.split()[-1].rstrip("."))
+                if "Pages inactive:" in line:
+                    free_pages += int(line.split()[-1].rstrip("."))
+            return int(free_pages * page_size / (1024 * 1024))
         else:
-            # Linux / macOS
+            # Linux
             with open("/proc/meminfo") as f:
                 for line in f:
                     if line.startswith("MemAvailable:"):
@@ -501,8 +518,10 @@ class TranscriberWorker(QObject):
                 return
 
             # Step 2~4: 무거운 작업 → 별도 프로세스에서 실행
-            msg_queue = mp.Queue()
-            cancel_event = mp.Event()
+            # Linux의 기본 fork는 PyTorch/CUDA와 충돌 가능 → spawn 명시
+            ctx = mp.get_context("spawn")
+            msg_queue = ctx.Queue()
+            cancel_event = ctx.Event()
 
             params = {
                 "wav_path": tmp_wav,
@@ -518,7 +537,7 @@ class TranscriberWorker(QObject):
                 "diar_threads": self.diar_threads,
             }
 
-            proc = mp.Process(
+            proc = ctx.Process(
                 target=_subprocess_worker,
                 args=(params, msg_queue, cancel_event),
                 daemon=True,
