@@ -1203,68 +1203,83 @@ class CorrectionDictDialog(QDialog):
         proc.start()
 
         result_data = None
-        while proc.is_alive() or not msg_queue.empty():
-            if progress.wasCanceled():
-                cancel_event.set()
-                proc.join(timeout=10)
-                break
-            try:
-                msg = msg_queue.get(timeout=0.1)
-            except Exception:
-                QApplication.processEvents()
-                continue
-
-            if msg[0] == "progress":
-                progress.setValue(msg[1])
-                progress.setLabelText(msg[2])
-            elif msg[0] == "result":
-                result_data = msg[1]
-            elif msg[0] == "error":
-                QMessageBox.critical(self, "분석 오류", msg[1])
-                break
-            QApplication.processEvents()
-
-        proc.join(timeout=5)
-        if proc.is_alive():
-            proc.kill()
-            proc.join(timeout=3)
-        progress.close()
-
-        # 임시 파일 정리
+        was_cancelled = False
+        error_msg = None
         try:
-            os.remove(tmp_wav)
-        except OSError:
-            pass
+            while proc.is_alive() or not msg_queue.empty():
+                if progress.wasCanceled():
+                    was_cancelled = True
+                    cancel_event.set()
+                    break
+                try:
+                    msg = msg_queue.get(timeout=0.1)
+                except Exception:
+                    QApplication.processEvents()
+                    continue
 
-        if not result_data:
+                if msg[0] == "progress":
+                    progress.setValue(msg[1])
+                    progress.setLabelText(msg[2])
+                elif msg[0] == "result":
+                    result_data = msg[1]
+                elif msg[0] == "error":
+                    error_msg = msg[1]
+                    break
+                QApplication.processEvents()
+        finally:
+            # 프로세스 정리 (취소/에러/정상 종료 모두)
+            if proc.is_alive():
+                if not cancel_event.is_set():
+                    cancel_event.set()
+                proc.join(timeout=10)
+            if proc.is_alive():
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                proc.join(timeout=3)
+            progress.close()
+            # 임시 파일 정리
+            try:
+                os.remove(tmp_wav)
+            except OSError:
+                pass
+
+        if error_msg:
+            QMessageBox.critical(self, "분석 오류", error_msg)
+            return
+        if was_cancelled or not result_data:
             return
 
         # DB에 사전 생성 + 항목 저장
-        dict_id = self.db.create_correction_dict(
-            name.strip(),
-            media_checksum=checksum,
-            media_filename=os.path.basename(filepath),
-        )
+        try:
+            dict_id = self.db.create_correction_dict(
+                name.strip(),
+                media_checksum=checksum,
+                media_filename=os.path.basename(filepath),
+            )
 
-        entries = []
-        for w in result_data["words"]:
-            entries.append({
-                "wrong": w["word"],
-                "correct": w["word"],  # 초기에는 동일 (사용자가 교정)
-                "start_time": w["start"],
-                "end_time": w["end"],
-                "speaker": w.get("speaker"),
-                "frequency": w["frequency"],
-                "is_corrected": False,
-            })
-        self.db.replace_correction_entries(dict_id, entries)
+            entries = []
+            for w in result_data.get("words", []):
+                entries.append({
+                    "wrong": w["word"],
+                    "correct": w["word"],  # 초기에는 동일 (사용자가 교정)
+                    "start_time": w["start"],
+                    "end_time": w["end"],
+                    "speaker": w.get("speaker"),
+                    "frequency": w["frequency"],
+                    "is_corrected": False,
+                })
+            self.db.replace_correction_entries(dict_id, entries)
 
-        self._refresh()
-        # 새로 만든 사전 선택
-        for i in range(self.list_dicts.count()):
-            if i < len(self._dicts) and self._dicts[i]["id"] == dict_id:
-                self.list_dicts.setCurrentRow(i)
-                break
+            self._refresh()
+            # 새로 만든 사전 선택
+            for i in range(self.list_dicts.count()):
+                if i < len(self._dicts) and self._dicts[i]["id"] == dict_id:
+                    self.list_dicts.setCurrentRow(i)
+                    break
+        except Exception as e:
+            QMessageBox.critical(self, "저장 오류", f"사전 저장 중 오류가 발생했습니다:\n{e}")
 
     def _change_checksum(self):
         dict_id = self._current_dict_id()

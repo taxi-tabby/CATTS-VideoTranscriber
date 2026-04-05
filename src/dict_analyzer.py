@@ -96,37 +96,77 @@ def _analyze_worker(params: dict, msg_queue: mp.Queue, cancel_event: mp.Event) -
         if _is_cancelled():
             return
 
+        # ── VAD 기반 청크 분할 (취소·진행률 지원) ──
+        from src.audio_preprocess import get_speech_segments, build_vad_chunks
+        speech_segments = get_speech_segments(audio)
+        _log(f"VAD 음성 구간: {len(speech_segments)}개")
+
+        if _is_cancelled():
+            return
+
         # ── Whisper 전사 (word_timestamps=True) ──
         _progress(40, "Whisper 모델 로드 중...")
         import whisper as _whisper
         from src.model_utils import get_whisper_cache_dir
         model = _whisper.load_model(model_name, download_root=get_whisper_cache_dir())
 
-        _progress(50, "단어 단위 분석 중...")
+        if _is_cancelled():
+            return
+
         lang_arg = language if language != "auto" else None
-        result = model.transcribe(
-            audio, language=lang_arg, verbose=False,
-            word_timestamps=True,
-        )
+        total_samples = len(audio)
+        vad_chunks = build_vad_chunks(speech_segments, total_samples)
+        single_chunks = [(vc["start_sample"], vc["end_sample"]) for vc in vad_chunks]
+        total_chunks = len(single_chunks)
+
+        raw_words = []
+        if total_chunks == 0:
+            _log("음성 구간이 없습니다.")
+        else:
+            _log(f"단어 단위 분석 시작 (총 {total_chunks}개 청크)")
+            audio_duration = total_samples / SAMPLE_RATE
+            start_time = time.time()
+            for chunk_idx, (chunk_start, chunk_end) in enumerate(single_chunks):
+                if _is_cancelled():
+                    _log(f"취소됨 — {chunk_idx}/{total_chunks} 청크 완료분 보존")
+                    return
+                chunk = audio[chunk_start:chunk_end]
+                time_offset = chunk_start / SAMPLE_RATE
+                processed_sec = min(chunk_end / SAMPLE_RATE, audio_duration)
+                pct = 50 + int((processed_sec / max(audio_duration, 1e-6)) * 30)
+                pct = min(pct, 80)
+
+                elapsed = time.time() - start_time
+                if processed_sec > 0 and elapsed > 1:
+                    eta = elapsed * (audio_duration - processed_sec) / processed_sec
+                    eta_min, eta_sec = divmod(int(eta), 60)
+                    eta_str = f" (남은 시간: {eta_min}분 {eta_sec}초)" if eta_min > 0 else f" (남은 시간: {eta_sec}초)"
+                else:
+                    eta_str = ""
+                _progress(pct, f"단어 단위 분석 중... {processed_sec:.0f}s / {audio_duration:.0f}s{eta_str}")
+
+                result = model.transcribe(
+                    chunk, language=lang_arg, verbose=False,
+                    word_timestamps=True,
+                )
+                for seg in result.get("segments", []):
+                    for w in seg.get("words", []):
+                        word_text = w.get("word", "").strip()
+                        if not word_text:
+                            continue
+                        start = w["start"] + time_offset + trim_offset_sec
+                        end = w["end"] + time_offset + trim_offset_sec
+                        raw_words.append({
+                            "word": word_text,
+                            "start": round(start, 3),
+                            "end": round(end, 3),
+                        })
 
         if _is_cancelled():
             return
 
-        # ── 단어 추출 + 화자 매칭 ──
+        # ── 단어 정리 + 화자 매칭 ──
         _progress(80, "단어 정리 중...")
-        raw_words = []
-        for seg in result.get("segments", []):
-            for w in seg.get("words", []):
-                word_text = w.get("word", "").strip()
-                if not word_text:
-                    continue
-                start = w["start"] + trim_offset_sec
-                end = w["end"] + trim_offset_sec
-                raw_words.append({
-                    "word": word_text,
-                    "start": round(start, 3),
-                    "end": round(end, 3),
-                })
 
         # 화자 매칭
         if diarization_segments:
